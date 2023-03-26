@@ -10,31 +10,17 @@
 
   outputs = { self, nixpkgs }: 
   let system = "x86_64-linux"; in
-  with nixpkgs.legacyPackages.${system};
-  let
-    compiler = "ghc943";
-    hPkgs = haskell.packages.${compiler};
-    stack-wrapped = symlinkJoin {
-      name = "stack";
-      paths = [ stack ];
-      buildInputs = [ makeWrapper ];
-      postBuild = ''
-        wrapProgram $out/bin/stack --add-flags \
-          "--no-nix --system-ghc --no-install-ghc"
-      '';
-    };
-
-  in {
+  with nixpkgs.legacyPackages.${system}; {
     devShells.x86_64-linux.default = mkShell {
-      buildInputs = [ stack-wrapped haskell.compiler.${compiler} ispell ]
-          ++ (with hPkgs; [
-            ghc ghcid
+      buildInputs = [ stack zlib ]
+          ++ (with haskellPackages; [
+            ghcid
             # Required by spacemacs haskell layer
             apply-refact hlint stylish-haskell hasktags hoogle
           ]);
       # Hack to make c stuff available to GHC
       # see: https://docs.haskellstack.org/en/stable/nix_integration/
-      LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ zlib hPkgs.ghc ];
+      # LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ zlib hPkgs.ghc ];
     };
 
   };
