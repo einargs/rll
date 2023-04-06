@@ -5,34 +5,67 @@ import Rll.Ast
 import Control.Monad (unless, when)
 import Data.Text (Text)
 import qualified Data.IntMap.Strict as M
-import Control.Monad.State (MonadState, StateT)
-import Control.Monad.Except (MonadError, Except)
+import Control.Monad.State (MonadState(..), StateT)
+import Control.Monad.Except (MonadError(..), Except)
+import Data.Maybe (fromMaybe)
 
-newtype Ctx = MkCtx {unCtx :: M.IntMap Ty}
+data Ctx = Ctx { termCtx :: M.IntMap (Int, Ty), tyCtx :: M.IntMap Kind }
   deriving Eq
 
-lookupVar :: Var -> Ctx -> Ty
-lookupVar (Var _ i) (MkCtx m) = M.lookup i m
+-- Does the number of shadowing references affect whether a subset is okay?
+subsetOf :: Ctx -> Ctx -> Bool
+subsetOf (MkCtx m1) (MkCtx m2) = M.isSubmapOf m1 m2
 
-addVar :: Var -> Ty -> Ctx -> Ctx
-addVar (Var _ i) ty (MkCtx m) = MkCtx $ M.insert i ty m
+data TyErr = TyErr Text
+
+newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
+  deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
+
+tyErr :: Text -> Tc a
+tyErr = throwError . TyErr
+
+lookupTyVar :: Var -> Tc Kind
+lookupTyVar (Var txt i) = fromMaybe
+  (tyErr $ "Cannot find type variable " <> txt)
+  $ get >>= M.lookup i . tyCtx
+
+-- | Get a list of variables this type shadows.
+tyShadows :: Ty -> [Var]
+tyShadows UnitTy = []
+tyShadows (SumTy x y) = tyShadows x <> tyShadows y
+tyShadows (ProdTy x y) = tyShadows x <> tyShadows y
+tyShadows Static = []
+tyShadows (TyVar x) = lookupTyVar >>= \case
+  Ty -> []
+  Lifetime -> [x]
+tyShadows (LtOf x) = [x]
+tyShadows (FunTy m x y z) = undefined
+tyShadows (LtJoin xs) = xs >>= tyShadows
+tyShadows (RefTy x y) = undefined
+tyShadows (Univ m xTy v k yTy) = undefined
+tyShadows (RecTy v xTy) = undefined
+
+joinSides :: Tc Ty -> Tc Ty -> Tc Ty
+joinSides s1 s2 = do
+  ctx <- get
+  ty1 <- s1
+  ctx1 <- get
+  set ctx
+  ty2 <- s2
+  ctx2 <- get
+  -- TODO compare them
+
+lookupVar :: Var -> Tc Ty
+lookupVar (Var _ i) = M.lookup i m
+
+addVar :: Var -> Ty -> Tc Ctx
+addVar (Var _ i) ty = modify $ MkCtx . M.insert i ty . unCtx
 
 dropVar :: Var -> Ctx -> Ctx
 dropVar (Var _ i) (MkCtx m) = MkCtx $ M.delete i m
 
 withVar :: Var -> Ty -> Ctx -> (Ctx -> a) -> a
 withVar v ty ctx f = f $ addVar v ty ctx
-
-subsetOf :: Ctx -> Ctx -> Bool
-subsetOf (MkCtx m1) (MkCtx m2) = M.isSubmapOf m1 m2
-
-data TyErr = TyErr Text
-
-newtype Tc a = MkTc { unTc :: Except TyErr a }
-  deriving (Functor, Applicative, Monad, MonadError TyErr)
-
-tyErr :: Text -> Tc a
-tyErr = throwError . TyErr
 
 synth :: Tm -> Ctx -> Tc (Ctx, Ty)
 synth tm ctx = do
