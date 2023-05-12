@@ -26,6 +26,7 @@ dependencies:
 - mtl >= 2.2
 - transformers >= 0.5.6
 - prettyprinter >= 1.7.1
+- hspec >= 2.9.7
 
 default-extensions:
 - BlockArguments

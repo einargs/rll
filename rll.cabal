@@ -63,6 +63,7 @@ library
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
+    , hspec >=2.9.7
     , mtl >=2.2
     , prettyprinter >=1.7.1
     , text >=1.2
@@ -107,6 +108,7 @@ executable rll-exe
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
+    , hspec >=2.9.7
     , mtl >=2.2
     , prettyprinter >=1.7.1
     , rll
@@ -118,6 +120,7 @@ test-suite rll-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      Rll.TypeCheckSpec
       Paths_rll
   hs-source-dirs:
       test
@@ -153,6 +156,7 @@ test-suite rll-test
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
+    , hspec >=2.9.7
     , mtl >=2.2
     , prettyprinter >=1.7.1
     , rll

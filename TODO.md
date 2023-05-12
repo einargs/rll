@@ -5,4 +5,8 @@
   and when to check that.
   - How does shadowing work for that?
 - [ ] Type equality that ignores variable names.
-- [ ] 
+- [ ] Look at changing the way I do lifetimes, so that RefTy just has a single
+  variable and Univ and MFunc have lists of variables. I don't think this works
+  because of type variables right? I think I can just have function types have
+  lists of lifetimes? No, because I need to be able to pass a list in a variable
+  to a function type.

@@ -3,17 +3,20 @@ module Rll.Ast where
 import Data.Text (Text)
 
 data Var = Var Text Int
-  deriving Eq
+  deriving Show
+
+instance Eq Var where
+  (Var _ i) == (Var _ j) = i == j
 
 data Kind
   = Ty
   | Lifetime
-  deriving Eq
+  deriving (Eq, Show)
 
 data Mult
   = Single
   | Many
-  deriving Eq
+  deriving (Eq, Show)
 
 data Ty
   = UnitTy
@@ -28,7 +31,7 @@ data Ty
   | RefTy Ty Ty
   | Univ Mult Ty Var Kind Ty
   | RecTy Var Ty
-  deriving Eq
+  deriving (Show, Eq)
 
 data Tm
   = Unit
@@ -37,7 +40,7 @@ data Tm
   | InR Tm
   | Case Mult Tm Var Tm Var Tm
   | ProdTm Tm Tm
-  | LetProd Var Var Tm Tm
+  | LetProd Mult Var Var Tm Tm
   | Let Var Tm Tm
   | FunTm Var (Maybe Ty) Tm
   | Poly Mult Var Kind Tm
@@ -52,4 +55,5 @@ data Tm
   | UnfoldRef Tm
   | RecFun Var Var Var (Maybe Ty) Tm
   | Anno Tm Ty
+  deriving Show
 
