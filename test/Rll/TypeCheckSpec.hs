@@ -57,17 +57,60 @@ spec = do
           letBody = LetUnit caseBody $ Case Single (TmVar a) d (TmVar d) e (LetUnit (TmVar e) Unit)
       letExp `synthTo` UnitTy
 
-    -- TODO: write check versions for these once check is implemented, since that's different.
     it "can synthesize a multiple use function type" do
       let f = FunTm a (Just UnitTy) $ TmVar a
       f `synthTo` FunTy Many UnitTy (LtJoin []) UnitTy
 
-    it "can synth a single use function type" do
+    it "can synth and check a single use function type" do
       let f = Let a Unit $ FunTm b (Just UnitTy) $ LetUnit (TmVar a) $ TmVar b
-      f `synthTo` FunTy Single UnitTy (LtJoin []) UnitTy
+          fTy = FunTy Single UnitTy (LtJoin []) UnitTy
+      f `synthTo` fTy
+      f `checkTo` fTy
 
     it "can synth a list of borrowed variables" do
       let expr = Let a sumVal $ LetUnit (AppTm f Unit) $ destroySum (TmVar a)
           arm v = Drop v $ TmVar b
           f = FunTm b (Just UnitTy) $ Case Many (RefTm a) c (arm c) d (arm d)
       expr `synthTo` UnitTy
+      expr `checkTo` UnitTy
+
+    it "can force a multi use function to be single use" do
+      let f = FunTm a (Just UnitTy) $ TmVar a
+      f `checkTo` FunTy Single UnitTy (LtJoin []) UnitTy
+      let f2 = (Anno (FunTm a Nothing $ TmVar a) (FunTy Single UnitTy (LtJoin []) UnitTy))
+          expr = AppTm f2 Unit
+      expr `synthTo` UnitTy
+      expr `checkTo` UnitTy
+
+    -- TODO write tests for nested functions.
+
+    it "can check a polymorphic abstraction" do
+      --TODO write tests for Single stuff.
+      let f = Poly a TyKind $ FunTm b (Just (TyVar a)) (TmVar b)
+          fTy = Univ Many (LtJoin []) a TyKind $ FunTy Many (TyVar a) (LtJoin []) (TyVar a)
+      f `synthTo` fTy
+
+    it "can apply a polymorphic abstraction" do
+      let f = Poly a TyKind $ FunTm b (Just (TyVar a)) (TmVar b)
+          expr = AppTy f UnitTy
+          exprTy = FunTy Many UnitTy (LtJoin []) UnitTy
+      expr `synthTo` exprTy
+      expr `checkTo` exprTy
+
+    it "can apply nested polymorphic abstraction correctly" do
+      -- TODO: the problem is I have to follow the de-brujin index conventions when writing stuff.
+      -- Should I even have a variable slot for Poly and Univ? I could just rewrite TyVar to use
+      -- a bare de-brujin index. Or a Var to keep text around? Or keep text and index in TyVar and
+      -- text in Poly/Univ.
+      let f = Poly b TyKind $ Poly a TyKind $ FunTm c (Just (ProdTy (TyVar b) (TyVar a))) (TmVar c)
+          f1 = AppTy f UnitTy
+          f1Ty = Univ Many (LtJoin []) a TyKind $
+            FunTy Many (ProdTy UnitTy (TyVar a)) (LtJoin []) (ProdTy UnitTy (TyVar a))
+          f2 = AppTy (AppTy f UnitTy) UnitTy
+          f2Ty = FunTy Many exprTy (LtJoin []) exprTy
+          expr = (AppTm (AppTy (AppTy f UnitTy) UnitTy) (ProdTm Unit Unit))
+          exprTy = ProdTy UnitTy UnitTy
+      f1 `synthTo` f1Ty
+      f2 `synthTo` f2Ty
+      expr `synthTo` exprTy
+      expr `checkTo` exprTy
