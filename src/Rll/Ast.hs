@@ -56,8 +56,9 @@ data Tm
   | AppTm Tm Tm
   | Fold Ty Tm
   | Unfold Tm
-  | UnfoldRef Tm
-  | RecFun Var Var Var (Maybe Ty) Tm
+  -- | argument var, function lifetime var, function var, body
+  -- Recursive functions cannot be synthesized.
+  | RecFun Var Var Var Tm
   | Anno Tm Ty
   deriving Show
 

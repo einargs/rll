@@ -263,8 +263,7 @@ varsBorrowedIn ctx tm = L.nub $ f tm [] where
     AppTm t1 t2 -> f t2 $ f t1 l
     Fold _ t1 -> f t1 l
     Unfold t1 -> f t1 l
-    UnfoldRef t1 -> f t1 l
-    RecFun _ _ _ _ t1 -> f t1 l
+    RecFun _ _ _ t1 -> f t1 l
     Anno t1 _ -> f t1 l
 
 consumedVars :: Ctx -> Ctx -> [Var]
@@ -297,30 +296,30 @@ checkStableBorrowCounts startCtx endCtx = unless (stableBorrowCounts startCtx en
     f _ (i1, _) (i2, _) | i1 /= i2 = Just ()
                         | otherwise = Nothing
 
-synthFun :: Var -> Ty -> Tm -> Tc Ty
-synthFun v vTy body = do
+mkClosureSynth :: Tm -> Tc a -> Tc (Ty, Mult, a)
+mkClosureSynth body m = do
   startCtx <- get
-  addVar v vTy
-  bodyTy <- synth body
+  out <- m
   endCtx <- get
   let vars = varsBorrowedIn startCtx body
       lts = LtJoin $ LtOf <$> vars
       mult = findMult startCtx endCtx
   checkStableBorrowCounts startCtx endCtx
   forM_ vars $ flip alterBorrowCount (+1)
+  pure $ (lts, mult, out)
+
+synthFun :: Var -> Ty -> Tm -> Tc Ty
+synthFun v vTy body = do
+  (lts, mult, bodyTy) <- mkClosureSynth body do
+    addVar v vTy
+    synth body
   pure $ FunTy mult vTy lts bodyTy
 
 synthPoly :: Var -> Kind -> Tm -> Tc Ty
 synthPoly v kind body = do
-  startCtx <- get
-  bodyTy <- withKind v kind $ synth body
-  endCtx <- get
-  let vars = varsBorrowedIn startCtx body
-      lts = LtJoin $ LtOf <$> vars
-      mult = findMult startCtx endCtx
-  checkStableBorrowCounts startCtx endCtx
-  forM_ vars $ flip alterBorrowCount (+1)
+  (lts, mult, bodyTy) <- mkClosureSynth body $ withKind v kind $ synth body
   pure $ Univ mult lts v kind bodyTy
+
 
 verifyBorrows :: Ctx -> Ty -> Tm -> Tc ()
 verifyBorrows ctx lts body = do
@@ -355,6 +354,13 @@ checkFun v body mult aTy lts bTy = mkClosureCheck body mult lts do
 checkPoly :: Var -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc ()
 checkPoly v kind body mult lts bodyTy = mkClosureCheck body mult lts do
   withKind v kind $ check bodyTy body
+
+checkRecFun :: Var -> Var -> Var -> Tm -> Ty -> Ty -> Ty -> Tc ()
+checkRecFun x funLtVar funVar body xTy lts bodyTy = mkClosureCheck body Many lts do
+  addVar x xTy
+  withKind funLtVar LtKind do
+    addVar funVar $ RefTy (TyVar funLtVar) $ FunTy Many xTy lts bodyTy
+    check bodyTy body
 
 synth :: Tm -> Tc Ty
 synth tm = verifyCtxSubset $ case tm of
@@ -421,11 +427,21 @@ synth tm = verifyCtxSubset $ case tm of
       _ -> tyErr "Must be a function to apply to an argument."
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
-  RecFun x ltOfFVar f (Just xTy) body -> undefined
-  RecFun _ _ _ Nothing _ -> tyErr "Cannot synthesize type of a function without an argument annotation."
-  Fold ty t1 -> undefined
-  Unfold t1 -> undefined
-  UnfoldRef t1 -> undefined
+  RecFun _ _ _ _ -> tyErr "Cannot synthesize type of a recursive function."
+  Fold foldTy t1 -> case foldTy of
+    RecTy _ innerTy -> do
+      let expandTy = typeSub foldTy innerTy
+      check expandTy t1
+      pure foldTy
+    _ -> tyErr "Fold was annotated with non-recursive type."
+  Unfold t1 -> do
+    t1Ty <- synth t1
+    case t1Ty of
+      RecTy _ innerTy -> do
+        pure $ typeSub t1Ty innerTy
+      RefTy lt foldTy@(RecTy _ innerTy) -> do
+        pure $ toRef lt $ typeSub foldTy innerTy
+      _ -> tyErr "Cannot unfold non-recursive type."
 
 check :: Ty -> Tm -> Tc ()
 check ty tm = verifyCtxSubset $ case (tm, ty) of
@@ -450,6 +466,9 @@ check ty tm = verifyCtxSubset $ case (tm, ty) of
     unless (v1 == v2) $ tyErr "Mismatch in type variable"
     unless (k1 == k2) $ tyErr "Kind mismatch"
     checkPoly v1 k1 body m lts bodyTy
+  (RecFun x funLtVar funVar body, FunTy m xTy lts bodyTy) -> do
+    when (m == Single) $ tyErr "Recursive function cannot be single use."
+    checkRecFun x funLtVar funVar body xTy lts bodyTy
   _ -> do
     ty' <- synth tm
     if ty == ty'

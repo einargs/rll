@@ -114,3 +114,8 @@ spec = do
       f2 `synthTo` f2Ty
       expr `synthTo` exprTy
       expr `checkTo` exprTy
+
+    it "can check recursive functions" do
+      let f = RecFun a b c $ TmVar a
+          fTy = FunTy Many UnitTy (LtJoin []) UnitTy
+      f `checkTo` fTy
