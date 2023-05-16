@@ -1,4 +1,4 @@
-{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE DuplicateRecordFields, PatternSynonyms #-}
 module Rll.Ast where
 
 import Data.Text (Text)
@@ -36,6 +36,8 @@ data Ty
   | Univ Mult Ty Var Kind Ty
   | RecTy Var Ty
   deriving (Show, Eq)
+
+pattern Static = LtJoin []
 
 data Tm
   = Unit

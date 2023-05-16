@@ -7,7 +7,7 @@ import Control.Monad (unless, when, forM_)
 import Data.Text (Text, pack)
 import qualified Data.IntMap.Strict as M
 import qualified Data.IntSet as S
-import Control.Monad.State (MonadState(..), StateT, modify', runStateT)
+import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Data.Maybe (fromMaybe)
 import Control.Arrow (first, second)
@@ -71,6 +71,13 @@ lookupEntry v@(Var _ i) = do
 lookupVar :: Var -> Tc Ty
 lookupVar v = snd <$> lookupEntry v
 
+lookupKind :: Var -> Tc Kind
+lookupKind v@(Var _ i) = do
+  m <- gets (.typeCtx)
+  case M.lookup i m of
+    Just k -> pure k
+    Nothing -> varErr v "is not a type variable."
+
 alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
 alterBorrowCount v@(Var _ i) f = modify' $ onTermCtx $ M.adjust (first f) i
 
@@ -91,7 +98,12 @@ addVar v@(Var name i) ty = do
 lifetimeVars :: Ty -> Tc [Var]
 lifetimeVars (LtOf v) = pure [v]
 lifetimeVars (LtJoin ls) = concat <$> traverse lifetimeVars ls
-lifetimeVars _ = tyErr "Not a lifetime."
+lifetimeVars (TyVar x) = do
+  k <- lookupKind x
+  case k of
+    LtKind -> pure []
+    TyKind -> varErr x "is not a lifetime."
+lifetimeVars ty = tyErr $ "Not a lifetime: " <> pack (show ty)
 
 decrementLts :: Ty -> Tc ()
 decrementLts lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount (subtract 1))
@@ -127,7 +139,7 @@ useRef ty = do
     RefTy l _ -> decrementLts l
     _ -> pure ()
 
--- | Utility function to drop kinds from the type context automatically.
+-- | Utility function to add and drop kinds from the type context automatically.
 withKind :: Var -> Kind -> Tc a -> Tc a
 withKind v@(Var _ i) k m = do
   ctx <- get
@@ -155,7 +167,7 @@ joinSides s1 s2 = do
   put ctx
   ty2 <- s2
   ctx2 <- get
-  unless (ctx1 == ctx2) $ tyErr "Sides don't match"
+  unless (ctx1 == ctx2) $ tyErr $ "Sides don't match: " <> pack (show ctx1) <> " | " <> pack (show ctx2)
   unless (ty1 == ty2) $ tyErr "Types don't match"
   pure ty1
 
@@ -200,7 +212,8 @@ addPartialBorrowVar v lt bTy = do
   addVar v ty
   case ty of
     RefTy (LtOf v') _ -> alterBorrowCount v' (+1)
-    _ -> error "No other possiblity should be valid"
+    RefTy (TyVar _) _ -> pure ()
+    _ -> tyErr $ "not a valid lifetime: " <> pack (show ty)
 
 caseClause :: Eq a => Mult -> Tm -> Var -> Tm -> Var -> Tm -> (Tm -> Tc a) -> Tc a
 caseClause Single t1 x t2 y t3 f = do
@@ -469,8 +482,14 @@ check ty tm = verifyCtxSubset $ case (tm, ty) of
   (RecFun x funLtVar funVar body, FunTy m xTy lts bodyTy) -> do
     when (m == Single) $ tyErr "Recursive function cannot be single use."
     checkRecFun x funLtVar funVar body xTy lts bodyTy
+  {- TODO: look into check for Unfold
+  (Unfold t1, RefTy lt bodyTy) -> do
+
+  (Unfold t1, ty) -> do
+    check (RecTy (Var "" 0) ty) t1
+  -}
   _ -> do
     ty' <- synth tm
     if ty == ty'
       then pure ()
-      else tyErr "no check rules matched, synthesize attempt produced different type"
+      else tyErr $ "inferred " <> pack (show ty') <> ", should be " <> pack (show ty)

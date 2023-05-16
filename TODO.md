@@ -13,3 +13,4 @@ NEXT STEP: write tests for checking functions.
   lists of lifetimes? No, because I need to be able to pass a list in a variable
   to a function type.
 - [ ] Add a way to get the names of variables from the context.
+- [ ] Change case statements to infer whether they're working on a reference or not.

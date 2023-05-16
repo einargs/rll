@@ -115,7 +115,31 @@ spec = do
       expr `synthTo` exprTy
       expr `checkTo` exprTy
 
-    it "can check recursive functions" do
-      let f = RecFun a b c $ TmVar a
-          fTy = FunTy Many UnitTy (LtJoin []) UnitTy
+    it "can check simple recursive functions" do
+      let f = RecFun a b c $ Drop c $ TmVar a
+          fTy = FunTy Many UnitTy Static UnitTy
       f `checkTo` fTy
+
+    it "can check nested recursive functions" do
+      let f = RecFun a b c $ FunTm d Nothing $ Drop c $ ProdTm (TmVar a) (TmVar d)
+          fTy = FunTy Many UnitTy Static $ FunTy Single UnitTy (LtJoin []) $ ProdTy UnitTy UnitTy
+      f `checkTo` fTy
+
+    let natTy = RecTy a $ SumTy UnitTy (TyVar a)
+        unfoldedNatTy = SumTy UnitTy natTy
+        natZero = Fold natTy $ Anno (InL Unit) unfoldedNatTy
+
+    it "can unfold types" do
+      let e = Fold natTy $ InR $ Fold natTy $ InL Unit
+          unfoldE = Unfold e
+          unfoldTy = SumTy UnitTy natTy
+      e `checkTo` natTy
+      unfoldE `checkTo` unfoldTy
+
+    it "can check complex operations on recursive types" do
+      let double = Poly a LtKind $ RecFun b g f $ Case Many (Unfold (TmVar b)) c leftBranch d rightBranch
+          leftBranch = Drop c $ Drop f natZero
+          addOne e = Fold natTy $ InR e
+          rightBranch = addOne $ addOne $ AppTm (TmVar f) (TmVar d)
+          doubleTy = Univ Many Static a LtKind $ FunTy Many (RefTy (TyVar a) natTy) Static natTy
+      double `checkTo` doubleTy
