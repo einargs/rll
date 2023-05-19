@@ -3,6 +3,7 @@ module Rll.TypeCheck where
 
 import Rll.Ast
 
+{-
 import Control.Monad (unless, when, forM_)
 import Data.Text (Text, pack)
 import qualified Data.IntMap.Strict as M
@@ -493,3 +494,4 @@ check ty tm = verifyCtxSubset $ case (tm, ty) of
     if ty == ty'
       then pure ()
       else tyErr $ "inferred " <> pack (show ty') <> ", should be " <> pack (show ty)
+-}
