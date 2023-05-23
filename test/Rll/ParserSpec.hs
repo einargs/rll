@@ -17,7 +17,7 @@ mkParserChecker p v text = case M.parse (p <* M.eof) "test.rll" text of
   Left err -> expectationFailure $ M.errorBundlePretty err
 
 es :: Span
-es = Span "test.rll" M.pos1 M.pos1 M.pos1 M.pos1
+es = Span "test.rll" 1 1 1 1
 
 tmFrom = mkParserChecker tm
 tyFrom = mkParserChecker ty
@@ -63,7 +63,9 @@ spec = do
     it "parses a reference" do
       RefTm (Var "x") es `tmFrom` "&x"
     it "parses term constructors" do
-      TmCon (Var "Unit") es `tmFrom` "Unit"
+      let tmCon t = TmCon (Var t) es
+      tmCon "Unit" `tmFrom` "Unit"
+      AppTm (AppTm (tmCon "Pair") (tmCon "Int") es) (tmCon "Str") es `tmFrom` "Pair Int Str"
     it "parses type application" do
       let t = AppTy (tmVar "x") (TyCon (Var "Bool") es) es
       t `tmFrom` "x [Bool]"
@@ -72,7 +74,7 @@ spec = do
     it "parses function application" do
       AppTm (tmVar "x") (tmVar "y") es `tmFrom` "x y"
     it "parses recursive functions" do
-      let t = RecFun (Var "f") (Var "l") (Var "x") (tmVar "x") es
+      let t = RecFun (Var "f") (TyVarBinding "l") (Var "x") (tmVar "x") es
       t `tmFrom` "fun x (l;f) x"
     it "parses type application" do
       Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"

@@ -3,7 +3,18 @@
 # For more information, please see the documentation at:
 #   https://docs.haskellstack.org/en/stable/lock_files
 
-packages: []
+packages:
+- completed:
+    name: errata
+    pantry-tree:
+      sha256: a09e702b7691d83c9d4b5c506ed79e0825232e93bab550312aca2cd70c943fff
+      size: 4008
+    sha256: c0f045188311862a6740b29660ed2d45de5048e4ecbd98cb29eafa349452cf37
+    size: 51143
+    url: https://github.com/einargs/errata/archive/03b05e1c355063b516f6b3d993d6498deaf94e36.tar.gz
+    version: 0.4.0.0
+  original:
+    url: https://github.com/einargs/errata/archive/03b05e1c355063b516f6b3d993d6498deaf94e36.tar.gz
 snapshots:
 - completed:
     sha256: bbe432b2abd6d866aa37f65a8129a5f858b7c6eaae9464f8bc2814ce92ac2d15

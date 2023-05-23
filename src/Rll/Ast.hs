@@ -2,11 +2,21 @@
 module Rll.Ast where
 
 import Data.Text (Text)
+import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
 import Text.Megaparsec (Pos)
+import Data.Hashable (Hashable(..))
 
 newtype Var = Var {name::Text}
-  deriving (Show, Eq)
+  deriving (Eq, Ord, Hashable)
+
+instance Show Var where
+  show v = T.unpack v.name
+
+{-
+instance Hashable Var where
+  hashWithSalt s (Var t) = hashWithSalt s t
+-}
 
 data TyVar = MkTyVar {name::Text, index::Int}
 
@@ -16,7 +26,7 @@ instance Show TyVar where
 instance Eq TyVar where
   (MkTyVar _ i) == (MkTyVar _ j) = i == j
 
-newtype TyVarBinding = TyVarBinding Text
+newtype TyVarBinding = TyVarBinding {name::Text}
   deriving Show
 
 instance Eq TyVarBinding where
@@ -33,10 +43,10 @@ data Decl
 
 data Span = Span
   { file :: FilePath
-  , startLine :: !Pos
-  , startColumn :: !Pos
-  , endLine :: !Pos
-  , endColumn :: !Pos
+  , startLine :: !Int
+  , startColumn :: !Int
+  , endLine :: !Int
+  , endColumn :: !Int
   }
   deriving Show
 
@@ -69,11 +79,28 @@ data Ty
   | RefTy Ty Ty Span
   -- | Multiplicity, lifetimes, type var name, type var kind, body
   | Univ Mult Ty TyVarBinding Kind Ty Span
-  deriving (Show, Eq)
+  deriving (Eq)
+
+instance Show Ty where
+  show (TyVar tv _) = T.unpack tv.name
+  show (TyCon v _) = T.unpack v.name
+  show (LtOf v _) = "'" <> T.unpack v.name
+  show (FunTy m a lts b _) = show a <> " -" <> m' <> show lts <> "> " <> show b
+    where m' = case m of
+            Many -> "M"
+            Single -> "S"
+  show (LtJoin tys _) = show tys
+  show (RefTy l t _) = "&" <> show l <> " " <> show t
+  show (Univ m lts b k t _) = "forall " <> m' <> " " <> show lts <> " "
+                              <> show b <> " : " <> show k <> ". " <> show t
+    where m' = case m of
+            Many -> "M"
+            Single -> "S"
 
 instance Spans Ty where
   getSpan ty = case ty of
     TyVar _ s -> s
+    TyCon _ s -> s
     LtOf _ s -> s
     FunTy _ _ _ _ s -> s
     LtJoin _ s -> s
@@ -98,7 +125,7 @@ data Tm
   | AppTm Tm Tm Span
   -- | argument var, function lifetime var, function var, body
   -- Recursive functions cannot be synthesized.
-  | RecFun Var Var Var Tm Span
+  | RecFun Var TyVarBinding Var Tm Span
   | Anno Tm Ty Span
   deriving (Show, Eq)
 
@@ -110,6 +137,7 @@ instance Spans Tm where
     FunTm _ _ _ s -> s
     Poly _ _ _ s -> s
     TmVar _ s -> s
+    TmCon _ s -> s
     Copy _ s -> s
     RefTm _ s -> s
     AppTy _ _ s -> s

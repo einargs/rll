@@ -1,144 +1,289 @@
-{-# LANGUAGE BlockArguments, OverloadedStrings #-}
+{-# LANGUAGE BlockArguments, OverloadedStrings, QuasiQuotes #-}
 module Rll.TypeCheckSpec where
 
 import Test.Hspec
 import qualified Data.Text as T
+import qualified Text.Megaparsec as M
 
+import QuoteTxt
+import qualified Rll.Parser as RP
 import Rll.TypeCheck
 import Rll.Ast
+import Rll.TypeError (prettyPrintError, TyErr(..))
+import Rll.Context
 
-spec :: Spec
-spec = pure ()
+processFile :: T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
+processFile text = mapM_ processDecl <$> M.parse RP.fileDecls "test.rll" text
 
-{-
-mkVars :: T.Text -> [Var]
-mkVars ts = uncurry Var <$> zip (T.splitOn " " ts) [0..]
+baseCtx :: Ctx
+baseCtx = case runTc emptyCtx fileTc of
+  Left err -> error $ show err
+  Right (_,ctx) -> ctx
+  where fileTc = case processFile file of
+          Left err -> error $ M.errorBundlePretty err
+          Right v -> v
+        file = [txt|
+struct Unit {}
+struct Int {}
+struct Str {}
+struct Pair { Int Str }
+enum Sum = Left Int | Right Str;
 
-synthTo :: Tm -> Ty -> Expectation
-synthTo tm ty = runTc emptyCtx (synth tm) `shouldBe` Right ty
+consInt : Int -M[]> Unit
+= \x -> let Int = x in Unit;
 
-checkTo :: Tm -> Ty -> Expectation
-checkTo tm ty = runTc emptyCtx (check ty tm) `shouldBe` Right ()
+consStr : Str -M[]> Unit
+= \x -> let Str = x in Unit;
+
+consPair : Pair -M[]> Unit
+= \p -> let Pair i s = p in
+let Int = i in let Str = s in Unit;
+
+consSum : Sum -M[]> Unit
+= \s -> case s of
+| Left i -> let Int = i in Unit
+| Right s -> let Str = s in Unit;
+|]
+
+buildChecker :: (Tm -> Ty -> Expectation) -> T.Text -> T.Text -> Expectation
+buildChecker cmp tmTxt tyTxt = do
+  termMay <- runP (RP.tm <* M.eof) tmTxt
+  typMay <- runP (RP.ty <* M.eof) tyTxt
+  case (termMay, typMay) of
+    (Just tm, Just ty) -> cmp tm ty
+    _ -> pure ()
+  where
+    runP :: RP.Parser a -> T.Text -> IO (Maybe a)
+    runP p txt = case M.parse (p <* M.eof) "test.rll" txt of
+      Right v -> pure $ Just v
+      Left err -> do
+        expectationFailure $ M.errorBundlePretty err
+        pure Nothing
+
+synthTo :: T.Text -> T.Text -> Expectation
+synthTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
+  f tm ty = case evalTc baseCtx (synth tm) of
+    Left err -> expectationFailure $ T.unpack $ prettyPrintError tmTxt err
+    Right ty' -> ty `shouldBe` ty
+
+checkTo :: T.Text -> T.Text -> Expectation
+checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
+  f tm ty = case evalTc baseCtx (check ty tm) of
+    Left err -> expectationFailure $ T.unpack $ prettyPrintError tmTxt err
+    Right _ -> pure ()
+
+mkTest :: Ctx -> T.Text -> Expectation
+mkTest ctx txt = case processFile txt of
+  Left err -> expectationFailure $ M.errorBundlePretty err
+  Right tc -> case evalTc ctx tc of
+    Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
+    Right _ -> pure ()
+
+rawTest = mkTest emptyCtx
+baseTest = mkTest baseCtx
+
+mkFailTest :: Ctx -> TyErr -> T.Text -> Expectation
+mkFailTest ctx err txt = case processFile txt of
+  Left err -> expectationFailure $ M.errorBundlePretty err
+  Right tc -> case evalTc ctx tc of
+    Left err' -> err' `shouldBe` err
+    Right _ -> expectationFailure "Expected to fail."
+
+baseFailTest = mkFailTest baseCtx
+
+es :: Span
+es = Span "test.rll" 1 1 1 1
+
+tyCon v = TyCon (Var v) es
 
 spec :: Spec
 spec = do
-  let [a,b,c,d,e,f,g] = mkVars "a b c d e f g"
-      sumVal = Anno (InL Unit) (SumTy UnitTy UnitTy)
-      destroySum expr = Case Single expr f (TmVar f) g (TmVar g)
-  describe "typechecking" do
-    -- TODO tests that check what fails on synth but works with check
-    it "can type check a nested product" do
-      ProdTm (ProdTm Unit Unit) Unit `synthTo` ProdTy (ProdTy UnitTy UnitTy) UnitTy
-    it "can check a case of" do
-      let caseArm v = LetUnit (TmVar v) (ProdTm Unit Unit)
-      Case Single (Anno (InL Unit) (SumTy UnitTy UnitTy)) a (caseArm a) b (caseArm b) `synthTo` ProdTy UnitTy UnitTy
-
+  -- describe "varsBorrowedIn" do
+  --   it "can derive a list of borrowed variables" do
+  --     let ctx = Ctx
+  --     varsBorrowedIn
+  describe "type checking" do
+    it "can type check using pair" do
+      baseTest [txt|
+        val : Pair
+        = Pair Int Str;
+        |]
     it "can borrow and drop" do
-      let letExp = Let a Unit $ Let b (RefTm a) $ Drop b $ TmVar a
-      letExp `synthTo` UnitTy
-
+      baseTest [txt|
+        test : Unit
+        = let a = Unit in let b = &a in drop b in a;
+        |]
+    it "can check a case of" do
+      baseTest [txt|
+        test : Unit =
+        case Left Int of
+        | Left d -> let Int = d in Unit
+        | Right d -> let Str = d in Unit;
+        |]
     it "checks that using a reference variable consumes it" do
-      let arm v = Drop v Unit
-          finalArm v = LetUnit (TmVar v) Unit
-          letExp = Let a (Anno (InL Unit) (SumTy UnitTy UnitTy)) letBody
-          caseBody = Let d (RefTm a) $ Case Many (TmVar d) b (arm b) c (arm c)
-          letBody = LetUnit caseBody $ Case Single (TmVar a) d (finalArm d) e (finalArm e)
+      baseTest [txt|
+        test : Unit =
+        let a = Left Int in
+        let Unit =
+          (let d = &a in
+          case d of
+          | Left b -> drop b in Unit
+          | Right c -> drop c in Unit) in
+        case a of
+        | Left d -> let Int = d in Unit
+        | Right e -> let Str = e in Unit;
+        |]
+    it "can use module functions" do
+      baseTest [txt|
+        t1 : Unit
+        = consInt Int;
 
-          top = Let a (ProdTm Unit Unit) $ Let d (RefTm a) $ LetProd Many b c (TmVar d) use
-          use = Drop b $ Drop c $ LetProd Single b c (TmVar a) $ LetUnit (TmVar b) $ TmVar c
-      letExp `synthTo` UnitTy
-      top `synthTo` UnitTy
+        t2 : Unit
+        = consStr Str;
+        |]
+    it "can catch an incorrect struct" do
+      baseFailTest (ExpectedButInferred (tyCon "Unit") (tyCon "Int") es) [txt|
+        test : Unit = Int;
+        |]
+    it "can check type application" do
+      baseTest [txt|
+        id : forall M [] t : Type . t -S[]> t
+        = ^ t : Type -> \v -> v;
+        test1 : Unit -S[]> Unit
+        = id [ Unit ];
+
+        test2 : Unit
+        = (id [ Unit ]) Unit;
+
+        test3 : Unit
+        = id [ Unit ] Unit;
+        |]
 
     it "can decompose a reference product" do
-      let top = Let a (ProdTm Unit Unit) $ LetProd Many b c (RefTm a) $ Drop b $ Drop c use
-          use = LetProd Single b c (TmVar a) $ LetUnit (TmVar b) $ TmVar c
-      top `synthTo` UnitTy
+      baseTest [txt|
+        consumeISR :
+          forall M [] l1 : Lifetime .
+          forall S [] l2 : Lifetime .
+          &l1 Int -S[]> &l2 Str -S[]> Unit
+        = ^ l1 : Lifetime -> ^ l2 : Lifetime -> \ir -> \sr ->
+        drop ir in drop sr in Unit;
 
-    it "can check a case inside a let" do
-      let arm v = Drop v Unit
-          letExp = Let a (Anno (InL Unit) (SumTy UnitTy UnitTy)) letBody
-          caseBody = Case Many (RefTm a) b (arm b) c (arm c)
-          letBody = LetUnit caseBody $ Case Single (TmVar a) d (TmVar d) e (LetUnit (TmVar e) Unit)
-      letExp `synthTo` UnitTy
+        test : Unit
+        = let a = Pair Int Str in
+        let Pair i s = &a in
+        let Unit = consumeISR ['a] ['a] i s in
+        let Pair i s = a in
+        let Int = i in let Str = s in Unit;
+
+        |]
+
+    it "can catch using a borrowed variable" do
+      let err = CannotUseBorrowedVar (Var "a") [Var "b"] es
+      baseFailTest err [txt|
+        test : Pair
+        = let a = Pair Int Str in
+        let b = &a in a;
+        |]
 
     it "can synthesize a multiple use function type" do
-      let f = FunTm a (Just UnitTy) $ TmVar a
-      f `synthTo` FunTy Many UnitTy (LtJoin []) UnitTy
+      "\\ a : Unit -> a" `synthTo` "Unit -M[]> Unit"
 
     it "can synth and check a single use function type" do
-      let f = Let a Unit $ FunTm b (Just UnitTy) $ LetUnit (TmVar a) $ TmVar b
-          fTy = FunTy Single UnitTy (LtJoin []) UnitTy
+      let f = [txt|let a = Int in (\b : Unit -> let Int = a in b) |]
+          fTy = "Unit -S[]> Unit"
       f `synthTo` fTy
       f `checkTo` fTy
 
-    it "can synth a list of borrowed variables" do
-      let expr = Let a sumVal $ LetUnit (AppTm f Unit) $ destroySum (TmVar a)
-          arm v = Drop v $ TmVar b
-          f = FunTm b (Just UnitTy) $ Case Many (RefTm a) c (arm c) d (arm d)
-      expr `synthTo` UnitTy
-      expr `checkTo` UnitTy
+    it "can catch using the wrong constructor in let-struct" do
+      baseFailTest (WrongConstructor (Var "Unit") "Int" (Var "Int") es) [txt|
+        test : Int -M[]> Unit -S[]> Unit
+        = \a -> \b : Unit -> let Unit = a in b;
+        |]
 
-    it "can force a multi use function to be single use" do
-      let f = FunTm a (Just UnitTy) $ TmVar a
-      f `checkTo` FunTy Single UnitTy (LtJoin []) UnitTy
-      let f2 = (Anno (FunTm a Nothing $ TmVar a) (FunTy Single UnitTy (LtJoin []) UnitTy))
-          expr = AppTm f2 Unit
-      expr `synthTo` UnitTy
-      expr `checkTo` UnitTy
+    it "can infer a function type that captures references" do
+      baseTest [txt|
+        test : Unit
+        = let a = Left Int in let Unit =
+        (\b : Unit -> case &a of
+          | Left i -> drop i in b
+          | Right s -> drop s in b) Unit in
+        consSum a;
+        |]
 
-    -- TODO write tests for nested functions.
+    it "can check a function type that captures references" do
+      baseTest [txt|
+        test : Unit
+        = let a = Left Int in let Unit =
+        ((\b : Unit -> case &a of
+          | Left i -> drop i in b
+          | Right s -> drop s in b)
+          : Unit -M['a]> Unit) Unit in
+        consSum a;
+        |]
 
-    it "can check a polymorphic abstraction" do
-      --TODO write tests for Single stuff.
-      let f = Poly a TyKind $ FunTm b (Just (TyVar a)) (TmVar b)
-          fTy = Univ Many (LtJoin []) a TyKind $ FunTy Many (TyVar a) (LtJoin []) (TyVar a)
-      f `synthTo` fTy
+    it "can coerce a multi-use function to be single use" do
+      baseTest [txt|
+        test : Unit
+        = let f = ((\b:Unit -> b) : Unit -S[]> Unit) in
+        f Unit;
+        |]
 
-    it "can apply a polymorphic abstraction" do
-      let f = Poly a TyKind $ FunTm b (Just (TyVar a)) (TmVar b)
-          expr = AppTy f UnitTy
-          exprTy = FunTy Many UnitTy (LtJoin []) UnitTy
-      expr `synthTo` exprTy
-      expr `checkTo` exprTy
+    it "can catch a multi-use function consuming a variable" do
+      baseFailTest (MultiFnCannotConsume [Var "a"] es)[txt|
+         test : Unit -M[]> Unit
+         = let a = Int in \x -> let Int = a in x;
+         |]
 
-    it "can apply nested polymorphic abstraction correctly" do
-      -- TODO: the problem is I have to follow the de-brujin index conventions when writing stuff.
-      -- Should I even have a variable slot for Poly and Univ? I could just rewrite TyVar to use
-      -- a bare de-brujin index. Or a Var to keep text around? Or keep text and index in TyVar and
-      -- text in Poly/Univ.
-      let f = Poly b TyKind $ Poly a TyKind $ FunTm c (Just (ProdTy (TyVar b) (TyVar a))) (TmVar c)
-          f1 = AppTy f UnitTy
-          f1Ty = Univ Many (LtJoin []) a TyKind $
-            FunTy Many (ProdTy UnitTy (TyVar a)) (LtJoin []) (ProdTy UnitTy (TyVar a))
-          f2 = AppTy (AppTy f UnitTy) UnitTy
-          f2Ty = FunTy Many exprTy (LtJoin []) exprTy
-          expr = (AppTm (AppTy (AppTy f UnitTy) UnitTy) (ProdTm Unit Unit))
-          exprTy = ProdTy UnitTy UnitTy
-      f1 `synthTo` f1Ty
-      f2 `synthTo` f2Ty
-      expr `synthTo` exprTy
-      expr `checkTo` exprTy
+    it "can catch a variable escaping the scope" do
+      baseFailTest (VarsEscapingScope [Var "a"] es) [txt|
+         test : Unit -M[]> Unit
+         = \x -> let a = Int in x;
+         |]
 
     it "can check simple recursive functions" do
-      let f = RecFun a b c $ Drop c $ TmVar a
-          fTy = FunTy Many UnitTy Static UnitTy
-      f `checkTo` fTy
+      baseTest [txt|
+         test : Unit -M[]> Unit
+         = fun f (l;x) drop f in x;
 
+         test2 : Unit -M[]> Unit -M[]> Unit
+         = fun f1 (l1;x) drop f1 in
+         let Unit = x in
+         fun f2 (l2;y) drop f2 in y;
+         |]
+
+    it "can catch a recursive function being single use" do
+      baseFailTest (RecFunIsNotSingle es es) [txt|
+        test : Unit -S[]> Unit
+        = fun f1 (l;x) x;
+        |]
+
+    it "can check complex recursive functions" do
+      baseTest [txt|
+        enum Nat = Succ Nat | Zero;
+
+        double : forall M [] l : Lifetime. &l Nat -M[]> Nat
+        = ^ l : Lifetime -> fun f (l;x) case x of
+        | Zero -> drop f in Zero
+        | Succ n -> Succ (Succ (f n));
+
+        add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
+        = ^ l : Lifetime -> fun f (fl;natRef) \nat ->
+        case natRef of
+        | Succ n -> f n (Succ nat)
+        | Zero -> drop f in nat;
+        |]
+      -- baseTest [txt|
+      --   test : Unit = Unit
+      --   |]
+
+{-
+spec :: Spec
+spec = do
+  describe "typechecking" do
     it "can check nested recursive functions" do
       let f = RecFun a b c $ FunTm d Nothing $ Drop c $ ProdTm (TmVar a) (TmVar d)
           fTy = FunTy Many UnitTy Static $ FunTy Single UnitTy (LtJoin []) $ ProdTy UnitTy UnitTy
       f `checkTo` fTy
-
-    let natTy = RecTy a $ SumTy UnitTy (TyVar a)
-        unfoldedNatTy = SumTy UnitTy natTy
-        natZero = Fold natTy $ Anno (InL Unit) unfoldedNatTy
-
-    it "can unfold types" do
-      let e = Fold natTy $ InR $ Fold natTy $ InL Unit
-          unfoldE = Unfold e
-          unfoldTy = SumTy UnitTy natTy
-      e `checkTo` natTy
-      unfoldE `checkTo` unfoldTy
 
     it "can check complex operations on recursive types" do
       let double = Poly a LtKind $ RecFun b g f $ Case Many (Unfold (TmVar b)) c leftBranch d rightBranch

@@ -7,11 +7,14 @@ import Data.Void (Void)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Megaparsec
+
 import qualified Text.Megaparsec.Char as C
 import qualified Text.Megaparsec.Char.Lexer as L
 import Data.Functor (($>))
 import Control.Monad (void)
 import Text.Megaparsec.Debug
+import qualified Data.Map as M
+import Data.List (foldl')
 
 import Rll.Ast
 
@@ -20,7 +23,7 @@ data RllParseError
   deriving (Show, Eq, Ord)
 
 instance ShowErrorComponent RllParseError where
-  showErrorComponent (VarIsKeyword txt) = T.unpack txt <> " cannot be a keyword."
+  showErrorComponent (VarIsKeyword txt) = T.unpack txt <> " is a keyword and cannot be a variable."
 
 type Parser = Parsec RllParseError Text
 
@@ -34,7 +37,8 @@ lexeme :: Parser a -> Parser a
 lexeme = L.lexeme space
 
 spanBetween :: SourcePos -> SourcePos -> Span
-spanBetween (SourcePos filePath sl sc) (SourcePos _ el ec) = Span filePath sl sc el ec
+spanBetween (SourcePos filePath sl sc) (SourcePos _ el ec) =
+  Span filePath (unPos sl) (unPos sc) (unPos el) (unPos ec)
 
 wrapSpan :: Parser (Span -> a) -> Parser a
 wrapSpan m = do
@@ -98,12 +102,13 @@ enumw = keyword "enum"
 structw = keyword "struct"
 forallw = keyword "forall"
 dotw = keyword "."
+semicolonw = keyword ";"
 
 keywords :: [Text]
 keywords = ["let", "in", "case", "copy", "drop", "fun", "enum", "forall", "struct", "of"]
 
 spanTo :: Spans a => SourcePos -> a -> Span
-spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = sl, startColumn = sc}
+spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = unPos sl, startColumn = unPos sc}
 
 kind :: Parser Kind
 kind = keyword "Type" $> TyKind <|> keyword "Lifetime" $> LtKind
@@ -161,8 +166,8 @@ ty = funTy <|> subTy
     refTy = label "reference type" do
       s1 <- getSourcePos
       refw
-      t1 <- ty
-      t2 <- ty
+      t1 <- subTy
+      t2 <- subTy
       pure $ RefTy t1 t2 $ s1 `spanTo` t2
     univTy = label "polymorphic type" do
       s1 <- getSourcePos
@@ -179,7 +184,7 @@ ty = funTy <|> subTy
       -- TODO finish ty, then test.
 
 tm :: Parser Tm
-tm = choice [appTy, appTm, anno, subTm]
+tm = choice [apps, anno, subTm]
   where
     subTm = choice [paren, caseTm, letStruct,
              tmVar, tmCon, copy, refTm, drop,
@@ -198,7 +203,7 @@ tm = choice [appTy, appTm, anno, subTm]
       val <- tm
       ofw
       branches <- some caseBranch
-      let (CaseBranch _ _ endTm) = head branches
+      let (CaseBranch _ _ endTm) = last branches
       pure $ Case val branches $ st `spanTo` endTm
     letStruct = branch "let struct" do
       st <- getSourcePos
@@ -246,15 +251,36 @@ tm = choice [appTy, appTm, anno, subTm]
       s2 <- getSourcePos
       space
       pure $ TmCon (Var name) $ spanBetween s1 s2
+    apps = branch "argument applications" do
+      s1 <- getSourcePos
+      t1 <- subTm
+      let tyArg = do
+            C.char '['
+            space
+            t <- ty
+            C.char ']'
+            s2 <- getSourcePos
+            space
+            pure $ Right (t, s2)
+      args <- some $ (Left <$> subTm) <|> tyArg
+      space
+      let f l (Left r) = AppTm l r $ s1 `spanTo` r
+          f l (Right (r, s2)) = AppTy l r $ spanBetween s1 s2
+      pure $ foldl' f t1 args
+      where
     appTy = branch "apply type" do
       s1 <- getSourcePos
-      f <- subTm
-      C.char '['
-      space
-      t <- ty
-      C.char ']'
-      space
-      pure $ AppTy f t $ s1 `spanTo` t
+      t1 <- subTm
+      tyArgs <- some do
+        C.char '['
+        space
+        t <- ty
+        C.char ']'
+        s2 <- getSourcePos
+        space
+        pure (t, s2)
+      let f l (r, s2) = AppTy l r $ spanBetween s1 s2
+      pure $ foldl' f t1 tyArgs
     drop = label "drop" do
       s1 <- getSourcePos
       dropw
@@ -265,14 +291,15 @@ tm = choice [appTy, appTm, anno, subTm]
     appTm = branch "function application" do
       s1 <- getSourcePos
       t1 <- subTm
-      t2 <- tm
-      pure $ AppTm t1 t2 $ s1 `spanTo` t2
+      args <- some subTm
+      let f l r = AppTm l r $ s1 `spanTo` r
+      pure $ foldl' f t1 args
     recFun = label "recursive function" do
       s1 <- getSourcePos
       recfunw
       funVar <- lowerVar
       keyword "("
-      funLtVar <- lowerVar
+      funLtVar <- TyVarBinding <$> lowerText
       keyword ";"
       arg <- lowerVar
       keyword ")"
@@ -287,13 +314,14 @@ tm = choice [appTy, appTm, anno, subTm]
 
 decl :: Parser Decl
 decl = choice [funDecl, enumDecl, structDecl] where
-  funDecl = branch "function declaration" do
+  funDecl = label "function declaration" do
     s1 <- getSourcePos
-    name <- lowerText
-    colonw
+    name <- try $ lowerText <* colonw
     funTy <- ty
     equalw
     funBody <- tm
+    semicolonw
+    space
     pure $ FunDecl name funTy funBody $ s1 `spanTo` funBody
   enumCon = do
     name <- upperText
@@ -305,8 +333,10 @@ decl = choice [funDecl, enumDecl, structDecl] where
     name <- upperText
     equalw
     cons <- enumCon `sepBy` barw
+    semicolonw
     -- TODO: switch to properly pulling the last source from the cons
     s2 <- getSourcePos
+    space
     pure $ EnumDecl name cons $ spanBetween s1 s2
   structDecl = label "struct declaration" do
     s1 <- getSourcePos
@@ -320,4 +350,4 @@ decl = choice [funDecl, enumDecl, structDecl] where
     pure $ StructDecl name members $ spanBetween s1 s2
 
 fileDecls :: Parser [Decl]
-fileDecls = space *> some decl
+fileDecls = space *> some decl <* eof
