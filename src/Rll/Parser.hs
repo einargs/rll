@@ -55,20 +55,33 @@ validateForKeywords m = do
     then customFailure $ VarIsKeyword txt
     else pure $ txt
 
+mkVarParser :: Parser Char -> Parser Text
+mkVarParser m = validateForKeywords $ fmap T.pack $ (:) <$> m <*> many C.alphaNumChar
+
 rawUpperText :: Parser Text
-rawUpperText = validateForKeywords $ fmap T.pack $ (:) <$> C.upperChar <*> many C.alphaNumChar
+rawUpperText = mkVarParser C.upperChar
+
+rawLowerText :: Parser Text
+rawLowerText = mkVarParser C.lowerChar
 
 upperText :: Parser Text
 upperText = lexeme rawUpperText
 
-rawLowerText :: Parser Text
-rawLowerText = validateForKeywords $ fmap T.pack $ (:) <$> C.lowerChar <*> many C.alphaNumChar
-
 lowerText :: Parser Text
-lowerText = lexeme $ rawLowerText
+lowerText = lexeme rawLowerText
 
 upperVar = Var <$> upperText
 lowerVar = Var <$> lowerText
+
+mkSVarParser :: Parser Text -> Parser SVar
+mkSVarParser m = lexeme do
+  s1 <- getSourcePos
+  t <- m
+  s2 <- getSourcePos
+  pure $ SVar (Var t) $ spanBetween s1 s2
+
+upperSVar = mkSVarParser rawUpperText
+lowerSVar = mkSVarParser rawLowerText
 
 varPredUtil :: Parser () -> (Var -> Span -> a) -> Parser a
 varPredUtil pred f = do
@@ -192,8 +205,8 @@ tm = choice [apps, anno, subTm]
     paren = branch "term parentheses" $ lexeme $ C.char '(' *> space *> tm <* C.char ')'
     caseBranch = label "case branch" do
       barw
-      con <- upperVar
-      vars <- many lowerVar
+      con <- upperSVar
+      vars <- many lowerSVar
       arroww
       body <- tm
       pure $ CaseBranch con vars body
@@ -208,8 +221,8 @@ tm = choice [apps, anno, subTm]
     letStruct = branch "let struct" do
       st <- getSourcePos
       letw
-      con <- upperVar
-      vars <- many lowerVar
+      con <- upperSVar
+      vars <- many lowerSVar
       equalw
       val <- tm
       inw
@@ -218,30 +231,33 @@ tm = choice [apps, anno, subTm]
     letVar = branch "let var" do
       st <- getSourcePos
       letw
-      var <- lowerVar
+      var <- lowerSVar
       equalw
       val <- tm
       inw
       body <- tm
       pure $ Let var val body $ st `spanTo` body
     funAnno = (Just <$> (colonw *> ty)) <|> pure Nothing
-    funTm = branch "term function" do
+    funTm = label "term function" do
       st <- getSourcePos
       funw
-      arg <- lowerVar
+      arg <- lowerSVar
       anno <- funAnno
       arroww
       body <- tm
       pure $ FunTm arg anno body $ st `spanTo` body
-    poly = branch "polymorphism term" do
+    poly = label "polymorphism term" do
       st <- getSourcePos
       polyw
-      bind <- TyVarBinding <$> lowerText
-      colonw
-      k <- kind
-      arroww
+      let pbind = try do
+            bind <- TyVarBinding <$> lowerText
+            colonw
+            k <- kind
+            arroww
+            pure $ Just (bind, k)
+      mbBind <- pbind <|> pure Nothing
       body <- tm
-      pure $ Poly bind k body $ st `spanTo` body
+      pure $ Poly mbBind body $ st `spanTo` body
     tmVar = branch "term variable" $ varPredUtil (pure ()) TmVar
     copy = label "copy" $ varPredUtil copyw Copy
     refTm = label "term reference" $ varPredUtil refw RefTm
@@ -284,7 +300,7 @@ tm = choice [apps, anno, subTm]
     drop = label "drop" do
       s1 <- getSourcePos
       dropw
-      var <- lowerVar
+      var <- lowerSVar
       inw
       body <- tm
       pure $ Drop var body $ s1 `spanTo` body
@@ -297,14 +313,12 @@ tm = choice [apps, anno, subTm]
     recFun = label "recursive function" do
       s1 <- getSourcePos
       recfunw
-      funVar <- lowerVar
+      funVar <- lowerSVar
       keyword "("
-      funLtVar <- TyVarBinding <$> lowerText
-      keyword ";"
-      arg <- lowerVar
+      arg <- lowerSVar
       keyword ")"
       body <- tm
-      pure $ RecFun arg funLtVar funVar body $ s1 `spanTo` body
+      pure $ RecFun arg funVar body $ s1 `spanTo` body
     anno = branch "type annotation" do
       s1 <- getSourcePos
       term <- subTm

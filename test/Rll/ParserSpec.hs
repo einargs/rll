@@ -23,6 +23,9 @@ tmFrom = mkParserChecker tm
 tyFrom = mkParserChecker ty
 declFrom = mkParserChecker decl
 
+sv :: Text -> SVar
+sv t = (SVar (Var t) es)
+
 parseShouldError :: (Show a, Eq a) => Parser a -> T.Text -> Expectation
 parseShouldError p t = do
   let result = M.parse (p <* M.eof) "test.rll" t
@@ -36,26 +39,29 @@ spec = do
       TmCon (Var "Unit") es `tmFrom` "(   (Unit   ))"
     it "parses case expressions" do
       let t = Case (tmVar "x") [b1, b2] es
-          b1 = CaseBranch (Var "True") [] (tmVar "y")
-          b2 = CaseBranch (Var "False") [] (tmVar "z")
+          b1 = CaseBranch (sv "True") [] (tmVar "y")
+          b2 = CaseBranch (sv "False") [] (tmVar "z")
       t `tmFrom` "case x of | True -> y | False -> z"
       -- TODO: I need to make a list of excluded keywords for the variable parsers.
     it "parses let struct" do
-      let t = LetStruct (Var "Pair") [Var "x", Var "y"] (TmVar (Var "pairVar") es) body es
-          body = AppTm (TmVar (Var "x") es) (TmVar (Var "y") es) es
+      let t = LetStruct (sv "Pair") [sv "x", sv "y"] (tmVar "pairVar") body es
+          body = AppTm (tmVar "x") (tmVar "y") es
       t `tmFrom` "let Pair x y = pairVar in x y"
     it "parses let var" do
-      let t = Let (Var "x") (TmVar (Var "y") es) (TmVar (Var "x") es) es
+      let t = Let (sv "x") (TmVar (Var "y") es) (TmVar (Var "x") es) es
       t `tmFrom` "let x = y in x"
     it "parses term function" do
-      let t a = FunTm (Var "x") a (TmVar (Var "x") es) es
+      let t a = FunTm (sv "x") a (TmVar (Var "x") es) es
           t1 = t $ Just $ TyCon (Var "Unit") es
           t2 = t Nothing
       t1 `tmFrom` "\\x : Unit -> x"
       t2 `tmFrom` "\\x -> x"
     it "parses a polymorphic abstraction" do
-      let t = Poly (TyVarBinding "x") LtKind (TmVar (Var "y") es) es
+      let t = Poly (Just (TyVarBinding "x", LtKind)) (TmVar (Var "y") es) es
+          t2 = Poly Nothing (tmVar "y") es
       t `tmFrom` "^x:Lifetime -> y"
+      t2 `tmFrom` "^ y"
+      t2 `tmFrom` "^y"
     it "parses term variable" do
       tmVar "x" `tmFrom` "x"
     it "parses copy" do
@@ -70,12 +76,12 @@ spec = do
       let t = AppTy (tmVar "x") (TyCon (Var "Bool") es) es
       t `tmFrom` "x [Bool]"
     it "parses drop" do
-      Drop (Var "x") (tmVar "y") es `tmFrom` "drop x in y"
+      Drop (sv "x") (tmVar "y") es `tmFrom` "drop x in y"
     it "parses function application" do
       AppTm (tmVar "x") (tmVar "y") es `tmFrom` "x y"
     it "parses recursive functions" do
-      let t = RecFun (Var "f") (TyVarBinding "l") (Var "x") (tmVar "x") es
-      t `tmFrom` "fun x (l;f) x"
+      let t = RecFun (sv "x") (sv "f") (tmVar "x") es
+      t `tmFrom` "fun f (x) x"
     it "parses type application" do
       Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"
     it "throws an error for nonsense" do
@@ -118,14 +124,14 @@ spec = do
         tmVar n = TmVar (Var n) es
     it "parses function declarations" do
       let t = FunDecl "test" (tyCon "Bool") (tmVar "b") es
-      t `declFrom` "test : Bool = b"
+      t `declFrom` "test : Bool = b;"
     it "parses enum declarations" do
       let t1 = EnumDecl "Either" [l, r] es
           l = EnumCon "Left" [tyVar "a"]
           r = EnumCon "Right" [tyVar "b", tyVar "c"]
           t2 = EnumDecl "Bool" [EnumCon "False" [], EnumCon "True" []] es
-      t1 `declFrom` "enum Either = Left a | Right b c"
-      t2 `declFrom` "enum Bool = False | True"
+      t1 `declFrom` "enum Either = Left a | Right b c;"
+      t2 `declFrom` "enum Bool = False | True;"
     it "parses struct declarations" do
       let t = StructDecl "Pair" [tyVar "a", tyVar "b"] es
       t `declFrom` "struct Pair { a b }"

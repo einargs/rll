@@ -28,6 +28,7 @@ struct Int {}
 struct Str {}
 struct Pair { Int Str }
 enum Sum = Left Int | Right Str;
+enum Bool = True | False;
 
 consInt : Int -M[]> Unit
 = \x -> let Int = x in Unit;
@@ -95,6 +96,7 @@ es :: Span
 es = Span "test.rll" 1 1 1 1
 
 tyCon v = TyCon (Var v) es
+refTy v ty = RefTy (LtOf (Var v) es) ty es
 
 spec :: Spec
 spec = do
@@ -243,18 +245,18 @@ spec = do
     it "can check simple recursive functions" do
       baseTest [txt|
          test : Unit -M[]> Unit
-         = fun f (l;x) drop f in x;
+         = fun f (x) drop f in x;
 
          test2 : Unit -M[]> Unit -M[]> Unit
-         = fun f1 (l1;x) drop f1 in
+         = fun f1 (x) drop f1 in
          let Unit = x in
-         fun f2 (l2;y) drop f2 in y;
+         fun f2 (y) drop f2 in y;
          |]
 
     it "can catch a recursive function being single use" do
       baseFailTest (RecFunIsNotSingle es es) [txt|
         test : Unit -S[]> Unit
-        = fun f1 (l;x) x;
+        = fun f1 (x) x;
         |]
 
     it "can check complex recursive functions" do
@@ -262,34 +264,82 @@ spec = do
         enum Nat = Succ Nat | Zero;
 
         double : forall M [] l : Lifetime. &l Nat -M[]> Nat
-        = ^ l : Lifetime -> fun f (l;x) case x of
+        = ^ l : Lifetime -> fun f (x) case x of
         | Zero -> drop f in Zero
         | Succ n -> Succ (Succ (f n));
 
         add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
-        = ^ l : Lifetime -> fun f (fl;natRef) \nat ->
+        = ^ l : Lifetime -> fun f (natRef) \nat ->
         case natRef of
         | Succ n -> f n (Succ nat)
         | Zero -> drop f in nat;
         |]
+
+    it "can check usage of reference copy" do
+      baseTest [txt|
+        test : Int
+        = let a = Int in
+        let b = &a in
+        let c = copy b in
+        drop b in
+        drop c in
+        a;
+        |]
+
+    it "can prevent copying a non-reference" do
+      let ty = tyCon "Int"
+      baseFailTest (CannotCopyNonRef ty es) [txt|
+        test : Int
+        = let a = Int in
+        let b = copy a in
+        a;
+        |]
+
+    it "can prevent taking reference of a reference" do
+      let ty = refTy "a" (tyCon "Int")
+      baseFailTest (CannotRefOfRef ty es) [txt|
+        test : Int
+        = let a = Int in
+        let b = &a in
+        let c = &b in
+        drop b in
+        drop c in
+        a;
+        |]
+
+    it "can catch splitting on a non-enum" do
+      baseFailTest (TypeIsNotEnum (tyCon "Int") es) [txt|
+        test : Unit
+        = let a = Int in
+        case a of
+        | True -> Unit
+        | False -> Unit;
+        |]
+
+      baseFailTest (TypeIsNotEnum (tyCon "Int") es) [txt|
+        test : Unit
+        = case Int of
+        | True -> Unit
+        | False -> Unit;
+        |]
+
+    it "can catch destructuring a non-struct" do
+      baseFailTest (TypeIsNotStruct (tyCon "Sum") es) [txt|
+        test : Unit
+        = let Pair x y = Left Int in
+        let Int = x in
+        conStr y;
+        |]
+
+    -- it "" do
+    --   baseTest [txt|
+    --     test : Unit = Unit
+    --     |]
+
+    -- TODO make sure I don't have any problems with type substitution
+    -- capturing a free variable in lifetimes.
+
+    -- TODO check copy
       -- baseTest [txt|
       --   test : Unit = Unit
       --   |]
-
-{-
-spec :: Spec
-spec = do
-  describe "typechecking" do
-    it "can check nested recursive functions" do
-      let f = RecFun a b c $ FunTm d Nothing $ Drop c $ ProdTm (TmVar a) (TmVar d)
-          fTy = FunTy Many UnitTy Static $ FunTy Single UnitTy (LtJoin []) $ ProdTy UnitTy UnitTy
-      f `checkTo` fTy
-
-    it "can check complex operations on recursive types" do
-      let double = Poly a LtKind $ RecFun b g f $ Case Many (Unfold (TmVar b)) c leftBranch d rightBranch
-          leftBranch = Drop c $ Drop f natZero
-          addOne e = Fold natTy $ InR e
-          rightBranch = addOne $ addOne $ AppTm (TmVar f) (TmVar d)
-          doubleTy = Univ Many Static a LtKind $ FunTy Many (RefTy (TyVar a) natTy) Static natTy
-      double `checkTo` doubleTy
--}

@@ -50,6 +50,14 @@ data Span = Span
   }
   deriving Show
 
+data SVar = SVar {var::Var, span::Span}
+
+instance Show SVar where
+  show v = show v.var
+
+instance Eq SVar where
+  v1 == v2 = v1.var == v2.var
+
 instance Eq Span where
   _ == _ = True
 
@@ -65,6 +73,9 @@ data Mult
 
 class Spans a where
   getSpan :: a -> Span
+
+instance Spans SVar where
+  getSpan sv = sv.span
 
 -- TODO Write Static as a pattern for LtJoin []
 data Ty
@@ -107,25 +118,25 @@ instance Spans Ty where
     RefTy _ _ s -> s
     Univ _ _ _ _ _ s -> s
 
-data CaseBranch = CaseBranch Var [Var] Tm
+data CaseBranch = CaseBranch SVar [SVar] Tm
   deriving (Show, Eq)
 
 data Tm
   = Case Tm [CaseBranch] Span
-  | LetStruct Var [Var] Tm Tm Span
-  | Let Var Tm Tm Span
-  | FunTm Var (Maybe Ty) Tm Span
-  | Poly TyVarBinding Kind Tm Span
+  | LetStruct SVar [SVar] Tm Tm Span
+  | Let SVar Tm Tm Span
+  | FunTm SVar (Maybe Ty) Tm Span
+  | Poly (Maybe (TyVarBinding, Kind)) Tm Span
   | TmVar Var Span
   | TmCon Var Span
   | Copy Var Span
   | RefTm Var Span
   | AppTy Tm Ty Span
-  | Drop Var Tm Span
+  | Drop SVar Tm Span
   | AppTm Tm Tm Span
-  -- | argument var, function lifetime var, function var, body
+  -- | argument var, function var, body
   -- Recursive functions cannot be synthesized.
-  | RecFun Var TyVarBinding Var Tm Span
+  | RecFun SVar SVar Tm Span
   | Anno Tm Ty Span
   deriving (Show, Eq)
 
@@ -135,7 +146,7 @@ instance Spans Tm where
     LetStruct _ _ _ _ s -> s
     Let _ _ _ s -> s
     FunTm _ _ _ s -> s
-    Poly _ _ _ s -> s
+    Poly _ _ s -> s
     TmVar _ s -> s
     TmCon _ s -> s
     Copy _ s -> s
@@ -143,6 +154,6 @@ instance Spans Tm where
     AppTy _ _ s -> s
     Drop _ _ s -> s
     AppTm _ _ s -> s
-    RecFun _ _ _ _ s -> s
+    RecFun _ _ _ s -> s
     Anno _ _ s -> s
 

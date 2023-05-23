@@ -56,9 +56,6 @@ indexTyVars = f 0 M.empty where
     _ -> pure typ
     where f' = f i idxMap
 
-emptyCtx :: Ctx
-emptyCtx = Ctx M.empty [] M.empty M.empty
-
 runTc :: Ctx -> Tc a -> Either TyErr (a, Ctx)
 runTc ctx = runExcept . flip runStateT ctx . unTc
 
@@ -140,6 +137,9 @@ borrowVar v s = do
   -- TODO: I think this is only used like once, so maybe just replace
   -- with doing it at call site. Better span manip then too.
   t <- lookupVar v s
+  case t of
+    RefTy _ _ _ -> throwError $ CannotRefOfRef t s
+    _ -> pure ()
   alterBorrowCount v (+1)
   -- TODO I'm pretty sure using this span makes sense, but check.
   pure $ RefTy (LtOf v s) t s
@@ -148,8 +148,14 @@ addVar :: Var -> Span -> Ty -> Tc ()
 addVar v s ty = do
   ctx <- get
   case M.lookup v ctx.termVars of
-    Just _ -> throwError $ VarAlreadyInScope v s
-    Nothing -> put $ ctx{termVars=M.insert v (0,ty) ctx.termVars}
+    Just _ -> do
+      varLocs <- gets (.varLocs)
+      def <- case M.lookup v varLocs of
+        Nothing -> error "varLocs was not properly synched to varTerms"
+        Just (def,_) -> pure def
+      throwError $ VarAlreadyInScope v s def
+    Nothing -> put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
+                        ,varLocs=M.insert v (s,Nothing) ctx.varLocs}
 
 -- | Get a list of explicitly mentioned variables in the lifetime.
 -- Ignores lifetime variables.
@@ -170,13 +176,17 @@ decrementLts lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount (subtract 1
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
-  unless (borrowCount == 0) $ throwError $ CannotDropBorrowedVar v s
+  unless (borrowCount == 0) $ do
+    borrowers <- variablesBorrowing v
+    throwError $ CannotDropBorrowedVar v borrowers s
   case ty of
     RefTy l _ _ -> decrementLts l
     Univ Many l _ _ _ _ -> decrementLts l
     FunTy Many _ l _ _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
-  modify' $ onTermVars $ M.delete v
+  let addDropLoc (s1,_) = (s1, Just s)
+  modify' $ \c -> c{termVars=M.delete v c.termVars
+                   ,varLocs=M.adjust addDropLoc v c.varLocs}
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
@@ -212,7 +222,10 @@ useVar v s = do
       pure ty
     Nothing -> case M.lookup v ctx.moduleTerms of
       Just ty -> pure ty
-      Nothing -> throwError $ UnknownTermVar v s
+      Nothing -> throwError $ case M.lookup v ctx.varLocs of
+        Just (_,Nothing) -> error "varLocs not in synch with termVars"
+        Just (_,Just dropSpan) -> DroppedTermVar s dropSpan
+        Nothing -> UnknownTermVar v s
 
 -- | Utility function for decrementing the borrow count of the referenced variable
 -- when we consume a reference term.
@@ -334,20 +347,20 @@ caseClause caseSpan t1 branches method = do
   case t1Ty of
     TyCon tyName conSpan -> do
       conMap <- ensureEnum t1Ty tyName conSpan
-      let f var ty = addVar var caseSpan ty
+      let f sv ty = addVar sv.var sv.span ty
       joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
     RefTy lt (TyCon tyName conSpan) _ -> do
       useRef t1Ty
       conMap <- ensureEnum t1Ty tyName conSpan
-      let f var ty = addPartialBorrowVar var caseSpan lt ty
+      let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
       joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
     _ -> throwError $ TypeIsNotEnum t1Ty $ getSpan t1
   where
-    handleBranch :: (Var -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> Tc a
+    handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> Tc a
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
-      case M.lookup conVar.name conMap of
+      case M.lookup conVar.var.name conMap of
         -- TODO: add spans to CaseBranch so I can pass that along instead of the case span.
-        Nothing -> throwError $ UnknownEnumCase tyName conVar caseSpan
+        Nothing -> throwError $ UnknownEnumCase tyName conVar
         Just varTys -> do
           unless (length varTys == length vars) $ throwError
             $ BadEnumCaseVars vars varTys caseSpan
@@ -360,7 +373,7 @@ caseClause caseSpan t1 branches method = do
       case dt of
         StructType _ _ _ -> throwError $ TypeIsNotEnum t1Ty (getSpan t1)
         EnumType conMap _ -> do
-          let hasCon t (CaseBranch v _ _) = t == v.name
+          let hasCon t (CaseBranch v _ _) = t == v.var.name
               count t = (t, filter (hasCon t) branches)
               occurances = count <$> M.keys conMap
               noBranches (_, brs) = 0 == length brs
@@ -373,30 +386,30 @@ caseClause caseSpan t1 branches method = do
             Nothing -> pure ()
           pure conMap
 
-letStructClause :: forall a. Span -> Var -> [Var] -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
+letStructClause :: forall a. Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
 letStructClause letSpan structCon memberVars t1 body method = do
   t1Ty <- synth t1
   case t1Ty of
     TyCon tyName tySpan -> do
-      let f var ty = addVar var letSpan ty
+      let f svar ty = addVar svar.var svar.span ty
       handle f t1Ty tyName tySpan
     RefTy lt (TyCon tyName tySpan) _ -> do
       useRef t1Ty
-      let f var ty = addPartialBorrowVar var letSpan lt ty
+      let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
       handle f t1Ty tyName tySpan
     _ -> throwError $ TypeIsNotStruct t1Ty $ getSpan t1
   where
-    handle :: (Var -> Ty -> Tc ()) -> Ty -> Var -> Span -> Tc a
+    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Var -> Span -> Tc a
     handle addMember t1Ty tyName tySpan = do
       -- TODO In the future I might remove the struct name since it's redundant.
       dt <- lookupDataType tyName tySpan
       case dt of
         EnumType _ _ -> throwError $ TypeIsNotStruct t1Ty $ getSpan t1
         StructType structCon' memberTys _ -> do
-          unless (structCon.name == structCon') $ throwError $
-            WrongConstructor structCon structCon' tyName letSpan
+          unless (structCon.var.name == structCon') $ throwError $
+            WrongConstructor structCon.var structCon' tyName structCon.span
           unless (length memberTys == length memberVars) $ throwError $
-            BadLetStructVars memberVars memberTys letSpan
+            BadLetStructVars memberVars memberTys
           let members = zip memberVars memberTys
           forM_ members $ uncurry addMember
           method body
@@ -416,7 +429,7 @@ varsBorrowedIn ctx tm = L.nub $ f tm [] where
     LetStruct _ _ t1 t2 _ -> f t2 $ f t1 l
     Let _ t1 t2 _ -> f t2 $ f t1 l
     FunTm _ _ t1 _ -> f t1 l
-    Poly _ _ t1 _ -> f t1 l
+    Poly _ t1 _ -> f t1 l
     TmVar _ _ -> l
     TmCon _ _ -> l
     Copy _ _ -> l
@@ -424,7 +437,7 @@ varsBorrowedIn ctx tm = L.nub $ f tm [] where
     AppTy t1 _ _ -> f t1 l
     Drop _ t1 _ -> f t1 l
     AppTm t1 t2 _ -> f t2 $ f t1 l
-    RecFun _ _ _ t1 _ -> f t1 l
+    RecFun _ _ t1 _ -> f t1 l
     Anno t1 _ _ -> f t1 l
 
 -- | Given an entrance and exit context, we see which variables in the
@@ -475,10 +488,10 @@ mkClosureSynth s body m = do
   forM_ vars $ flip alterBorrowCount (+1)
   pure $ (lts, mult, out)
 
-synthFun :: Span -> Var -> Ty -> Tm -> Tc Ty
+synthFun :: Span -> SVar -> Ty -> Tm -> Tc Ty
 synthFun s v vTy body = do
   (lts, mult, bodyTy) <- mkClosureSynth s body do
-    addVar v s vTy
+    addVar v.var v.span vTy
     synth body
   pure $ FunTy mult vTy lts bodyTy s
 
@@ -514,28 +527,29 @@ mkClosureCheck s body mult lts m = do
 
   checkStableBorrowCounts s startCtx endCtx
 
-checkFun :: Span -> Var -> Tm -> Mult -> Ty -> Ty -> Ty -> Tc ()
+checkFun :: Span -> SVar -> Tm -> Mult -> Ty -> Ty -> Ty -> Tc ()
 checkFun s v body mult aTy lts bTy = mkClosureCheck s body mult lts do
-  addVar v s aTy
+  addVar v.var v.span aTy
   check bTy body
 
 checkPoly :: Span -> TyVarBinding -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc ()
 checkPoly s b kind body mult lts bodyTy = mkClosureCheck s body mult lts do
   withKind kind $ check bodyTy body
 
-checkRecFun :: Span -> Var -> TyVarBinding -> Var -> Tm -> Ty -> Ty -> Ty -> Tc ()
-checkRecFun s x funLtVar funVar body xTy lts bodyTy = mkClosureCheck s body Many lts do
-  addVar x s xTy
+checkRecFun :: Span -> SVar -> SVar -> Tm -> Ty -> Ty -> Ty -> Tc ()
+checkRecFun s x funVar body xTy lts bodyTy = mkClosureCheck s body Many lts do
+  addVar x.var x.span xTy
   withKind LtKind do
-    let fTy = FunTy Many xTy lts bodyTy s
-        rTy = RefTy (TyVar (MkTyVar funLtVar.name 0) s) fTy s
-    addVar funVar s rTy
+    let fTy = FunTy Many xTy lts bodyTy funVar.span
+        fLtName = funVar.var.name <> "Lifetime"
+        rTy = RefTy (TyVar (MkTyVar fLtName 0) funVar.span) fTy funVar.span
+    addVar funVar.var funVar.span rTy
     check bodyTy body
 
 synth :: Tm -> Tc Ty
 synth tm = verifyCtxSubset (getSpan tm) $ case tm of
-  Drop v t s -> do
-    dropVar v s
+  Drop sv t s -> do
+    dropVar sv.var sv.span
     synth t
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 synth
   TmCon v s -> lookupDataCon v s
@@ -546,13 +560,14 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
     case vTy of
       RefTy (LtOf v' _ ) _ _ -> borrowVar v' s
       RefTy _ _ _ -> pure vTy
-      _ -> throwError $ TypeIsNotRef vTy s
+      _ -> throwError $ CannotCopyNonRef vTy s
   RefTm v s -> borrowVar v s
-  Let x t1 t2 s -> letClause s x t1 t2 synth
+  Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 synth
   Case t1 branches s -> caseClause s t1 branches synth
   FunTm v (Just vTy) body s -> synthFun s v vTy body
-  FunTm _ Nothing _ s -> throwError $ FunTySynthRequiresAnno s
-  Poly v kind body s -> synthPoly s v kind body
+  FunTm _ Nothing _ s -> throwError $ SynthRequiresAnno s
+  Poly (Just (v,kind)) body s -> synthPoly s v kind body
+  Poly Nothing _ s -> throwError $ SynthRequiresAnno s
   AppTy t1 tyArg s -> do
     t1Ty <- synth t1
     case t1Ty of
@@ -587,15 +602,15 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
       _ -> throwError $ TyIsNotFun t1Ty s
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
-  RecFun _ _ _ _ s -> throwError $ CannotSynthRecFun s
+  RecFun _ _ _ s -> throwError $ CannotSynthRecFun s
 
 check :: Ty -> Tm -> Tc ()
 check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
-  Let x t1 t2 s -> letClause s x t1 t2 $ check ty
+  Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 $ check ty
   Case t1 branches s -> caseClause s t1 branches $ check ty
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 $ check ty
-  Drop v t s -> do
-    dropVar v s
+  Drop sv t s -> do
+    dropVar sv.var sv.span
     check ty t
   FunTm v mbVTy body s ->
     case ty of
@@ -605,19 +620,20 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
           Nothing -> pure ()
         checkFun s v body m aTy lts bTy
       _ -> throwError $ ExpectedFunType ty s
-  Poly b1 k1 body s1 ->
+  Poly mbBind body s1 ->
     case ty of
       Univ m lts b2 k2 bodyTy s2 -> do
-        -- TODO I don't know if this should check text name.
-        unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
-        unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
-        checkPoly s1 b1 k1 body m lts bodyTy
+        forM_ mbBind \(b1,k1) -> do
+          -- TODO I don't know if this should check text name.
+          unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
+          unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
+        checkPoly s1 b2 k2 body m lts bodyTy
       _ -> throwError $ ExpectedUnivType ty s1
-  RecFun x funLtVar funVar body s1 ->
+  RecFun x funVar body s1 ->
     case ty of
       FunTy m xTy lts bodyTy s2 -> do
         when (m == Single) $ throwError $ RecFunIsNotSingle s1 s2
-        checkRecFun s1 x funLtVar funVar body xTy lts bodyTy
+        checkRecFun s1 x funVar body xTy lts bodyTy
       _ -> throwError $ ExpectedFunType ty s1
   _ -> do
     ty' <- synth tm
@@ -628,7 +644,9 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
 processDecl :: Decl -> Tc ()
 processDecl decl = case decl of
   FunDecl name ty body s -> do
+    ctx <- get
     check ty body
+    put ctx
     -- TODO: add check to make sure they're all multi-use
     addModuleFun s (Var name) ty
   StructDecl name args s -> do

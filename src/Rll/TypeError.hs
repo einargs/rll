@@ -21,16 +21,22 @@ data TyErr
   | UnknownTypeVar Text Span
   -- | The term variable has either been dropped or never introduced.
   | UnknownTermVar Var Span
+  -- | We know the term var was dropped.
+  --
+  -- Current usage span, where it was dropped
+  | DroppedTermVar Span Span
   -- | Referenced an undefined datatype.
   | UnknownDataType Var Span
   -- | The introduction of a new variable would shadow an existing one.
-  | VarAlreadyInScope Var Span
+  --
+  -- The new variable, it's span, and the span of the existing one
+  | VarAlreadyInScope Var Span Span
   -- | We expected the type to have a different kind.
   -- Expected kind, Type, type's kind
   -- TODO may eventually need a span for specific site indication?
   | ExpectedKind Kind Ty Kind
   -- | Cannot drop a variable that is still borrowed.
-  | CannotDropBorrowedVar Var Span
+  | CannotDropBorrowedVar Var [Var] Span
   -- | This type cannot be dropped.
   | CannotDropTy Ty Span
   -- | We cannot consume or move this var while it is borrowed.
@@ -63,9 +69,11 @@ data TyErr
   -- TODO the last span should be the span for the enum branch,
   -- but the parser doesn't do that right now, so instead it's
   -- for the entire case statement.
-  | UnknownEnumCase Var Var Span
+  | UnknownEnumCase Var SVar
+  -- | Unknown data constructor. May merge with some of the enum errors.
+  | UnknownDataCon Var Span
   -- | The case of branch used the wrong number of variables for a constructor.
-  | BadEnumCaseVars [Var] [Ty] Span
+  | BadEnumCaseVars [SVar] [Ty] Span
   -- | Missing a branch for this enum case in this case of expression.
   | NoBranchForCase Text Span
   -- | Multiple branches for the same enum case in this case of expression.
@@ -80,7 +88,7 @@ data TyErr
   -- the span of the let struct expression
   | WrongConstructor Var Text Var Span
   -- | The number of variables in let struct did not match the struct definition.
-  | BadLetStructVars [Var] [Ty] Span
+  | BadLetStructVars [SVar] [Ty]
   -- | A multi-use closure consumed external variables.
   --
   -- List of consumed variables, span of closure.
@@ -92,14 +100,12 @@ data TyErr
   --
   -- Type specifying borrowed variables, list of variables, closure span
   | IncorrectBorrowedVars Ty [Var] Span
-  -- | Unknown data constructor. May merge with some of the enum errors.
-  | UnknownDataCon Var Span
   -- | Attempted to copy a variable that is not a reference.
   --
   -- Type of variable, span of copy.
-  | TypeIsNotRef Ty Span
-  -- | Cannot synthesize a function type without an argument annotation.
-  | FunTySynthRequiresAnno Span
+  | CannotCopyNonRef Ty Span
+  -- | Cannot synthesize a function type or univ type without an argument annotation.
+  | SynthRequiresAnno Span
   -- | Cannot apply a type argument to this type.
   --
   -- type, span of AppTy
@@ -145,6 +151,10 @@ data TyErr
   --
   -- Type got, span of term.
   | ExpectedUnivType Ty Span
+  -- | Cannot take a reference of a reference.
+  --
+  -- Type of thing being ref'd, span of term being ref'd
+  | CannotRefOfRef Ty Span
   deriving (Eq, Show)
 
 tshow :: Show a => a -> Text
@@ -176,6 +186,8 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
   block s hdr ptrs bdy = E.Errata Nothing
     [defBlock s hdr ptrs bdy] Nothing
 
+  spanMsg s msg = block s (Just msg) (defaultSpanToPtrs s) Nothing
+
   errMsg = case err of
     CannotJoinCtxs ctxs s ->
       let f (v,bc,ty) = v.name <> ": " <> tshow ty
@@ -192,8 +204,8 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       (spanToPtrs False Nothing S.fancyRedPointer s)
       Nothing
 
-    FunTySynthRequiresAnno s -> block s
-      (Just "Function type synthesis requires an argument annotation.")
+    SynthRequiresAnno s -> block s
+      (Just "Type synthesis requires an argument annotation.")
       (spanToPtrs True Nothing S.fancyRedPointer s)
       Nothing
 
@@ -227,15 +239,11 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
         (defaultSpanToPtrs expSpan)
         Nothing
 
-    VarsEscapingScope vars s -> block s
-      (Just $ "Variables escaping scope: " <> varList vars)
-      (defaultSpanToPtrs s)
-      Nothing
+    VarsEscapingScope vars s -> spanMsg s $
+      "Variables escaping scope: " <> varList vars
 
-    MultiFnCannotConsume vars s -> block s
-      (Just $ "Multi-use function cannot consume variables: " <> varList vars)
-      (defaultSpanToPtrs s)
-      Nothing
+    MultiFnCannotConsume vars s -> spanMsg s $
+      "Multi-use function cannot consume variables: " <> varList vars
 
     ExpectedFunType ty s ->
       let tySpan = getSpan ty
@@ -269,10 +277,20 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
         ]
         Nothing
 
-    CannotSynthRecFun s -> block s
-      (Just "Cannot synthesize the type of a recursive function.")
-      (defaultSpanToPtrs s)
-      Nothing
+    CannotSynthRecFun s -> spanMsg s
+      "Cannot synthesize the type of a recursive function."
+
+    CannotRefOfRef ty s -> spanMsg s
+      "Cannot create a reference to a reference:"
+
+    CannotCopyNonRef ty s -> spanMsg s
+      "Can only copy a reference."
+
+    TypeIsNotEnum ty s -> spanMsg s $
+      "expected an enum here, instead got type " <> tshow ty
+
+    TypeIsNotStruct ty s -> spanMsg s $
+      "expected a struct here, instead got type " <> tshow ty
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]
