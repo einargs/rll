@@ -93,7 +93,7 @@ data Ty
   deriving (Eq)
 
 instance Show Ty where
-  show (TyVar tv _) = T.unpack tv.name
+  show (TyVar tv _) = show tv
   show (TyCon v _) = T.unpack v.name
   show (LtOf v _) = "'" <> T.unpack v.name
   show (FunTy m a lts b _) = show a <> " -" <> m' <> show lts <> "> " <> show b
@@ -103,7 +103,7 @@ instance Show Ty where
   show (LtJoin tys _) = show tys
   show (RefTy l t _) = "&" <> show l <> " " <> show t
   show (Univ m lts b k t _) = "forall " <> m' <> " " <> show lts <> " "
-                              <> show b <> " : " <> show k <> ". " <> show t
+                              <> T.unpack b.name <> " : " <> show k <> ". " <> show t
     where m' = case m of
             Many -> "M"
             Single -> "S"

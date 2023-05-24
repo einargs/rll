@@ -21,10 +21,10 @@ data TyErr
   | UnknownTypeVar Text Span
   -- | The term variable has either been dropped or never introduced.
   | UnknownTermVar Var Span
-  -- | We know the term var was dropped.
+  -- | We know the term var was used/dropped.
   --
-  -- Current usage span, where it was dropped
-  | DroppedTermVar Span Span
+  -- Current usage span, where it was used/dropped
+  | RemovedTermVar Span Span
   -- | Referenced an undefined datatype.
   | UnknownDataType Var Span
   -- | The introduction of a new variable would shadow an existing one.
@@ -183,6 +183,7 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
   spanToBlockLoc s = (s.file, s.startLine, s.startColumn)
   highlightBlock s = E.Block highlightStyle (spanToBlockLoc s)
   defBlock s = E.Block defaultStyle (spanToBlockLoc s)
+  simpleBlock s msg = defBlock s (Just msg) (defaultSpanToPtrs s) Nothing
   block s hdr ptrs bdy = E.Errata Nothing
     [defBlock s hdr ptrs bdy] Nothing
 
@@ -213,6 +214,12 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       (Just $ "Unknown variable " <> v.name)
       (spanToPtrs True Nothing S.fancyRedPointer s)
       Nothing
+
+    RemovedTermVar use dropped ->
+      E.Errata (Just "Term variable was used after being used/dropped")
+      [ simpleBlock use "Used here"
+      , simpleBlock dropped "Removed here"
+      ] Nothing
 
     CannotUseBorrowedVar v borrowers s -> block s
       (Just $ "Cannot use variable " <> v.name <> " while it is borrowed")
@@ -291,6 +298,17 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
 
     TypeIsNotStruct ty s -> spanMsg s $
       "expected a struct here, instead got type " <> tshow ty
+
+    TyIsNotFun ty s -> spanMsg s $
+      "Can only apply term arguments to functions"
+
+    CompilerLogicError msg mbSpan ->
+      let blocks = case mbSpan of
+            Just s -> [defBlock s Nothing (defaultSpanToPtrs s) Nothing]
+            Nothing -> []
+      in E.Errata (Just msg) blocks Nothing
+
+    UnknownTypeVar name s -> spanMsg s "Unknown type variable"
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]

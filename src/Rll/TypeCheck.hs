@@ -5,7 +5,7 @@ import Rll.Ast
 import Rll.TypeError
 import Rll.Context
 
-import Control.Monad (unless, when, forM_)
+import Control.Monad (unless, when, forM_, void)
 import Data.Text (Text, pack, unpack)
 import qualified Data.IntMap as IM
 import qualified Data.IntSet as IS
@@ -25,48 +25,124 @@ import Safe (atMay)
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
 
--- | Creates de-brujin indices for the type variables.
-indexTyVars :: Ty -> Tc Ty
-indexTyVars = f 0 M.empty where
-  -- | Algorithm works by keeping count of how many binders we've descended
-  -- beneath and then a map of at which binder a variable is introduced.
-  -- Then we just take the difference to get the de-brujin index.
-  f :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
-  f i idxMap typ = case typ of
-    TyVar (MkTyVar name _) s -> case M.lookup name idxMap of
-      Just i' -> pure $ TyVar (MkTyVar name $ i-i') s
-      Nothing -> throwError $ UnknownTypeVar name s
-    FunTy m aTy lts bTy s -> do
-      aTy' <- f' aTy
-      lts' <- f' lts
-      bTy' <- f' bTy
-      pure $ FunTy m aTy' lts' bTy' s
-    LtJoin tys s -> do
-      tys' <- traverse f' tys
-      pure $ LtJoin tys' s
-    RefTy lt aTy s -> do
-      lt' <- f' lt
-      aTy' <- f' aTy
-      pure $ RefTy lt' aTy' s
-    Univ m lts bind@(TyVarBinding name) k bodyTy s -> do
-      lts' <- f' lts
-      let idxMap' = M.insert name (i+1) idxMap
-      bodyTy' <- f (i+1) idxMap' bodyTy
-      pure $ Univ m lts' bind k bodyTy' s
-    _ -> pure typ
-    where f' = f i idxMap
-
 runTc :: Ctx -> Tc a -> Either TyErr (a, Ctx)
 runTc ctx = runExcept . flip runStateT ctx . unTc
 
 evalTc :: Ctx -> Tc a -> Either TyErr a
 evalTc ctx = fmap fst . runTc ctx
 
+-- | Creates de-brujin indices for the type variables.
+--
+-- Algorithm works by keeping count of how many binders we've descended
+-- beneath and then a map of at which binder a variable is introduced.
+-- Then we just take the difference to get the de-brujin index.
+rawIndexTyVars :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
+rawIndexTyVars i idxMap typ = case typ of
+  TyVar (MkTyVar name _) s -> case M.lookup name idxMap of
+    Just i' -> T.trace (unpack name <> "@" <> (show $ i-i'))$ pure $ TyVar (MkTyVar name $ i-i') s
+    Nothing -> throwError $ UnknownTypeVar name s
+  FunTy m aTy lts bTy s -> do
+    aTy' <- f' aTy
+    lts' <- f' lts
+    bTy' <- f' bTy
+    pure $ FunTy m aTy' lts' bTy' s
+  LtJoin tys s -> do
+    tys' <- traverse f' tys
+    pure $ LtJoin tys' s
+  RefTy lt aTy s -> do
+    lt' <- f' lt
+    aTy' <- f' aTy
+    pure $ RefTy lt' aTy' s
+  Univ m lts bind@(TyVarBinding name) k bodyTy s -> do
+    lts' <- f' lts
+    let idxMap' = M.insert name (i+1) idxMap
+    bodyTy' <- rawIndexTyVars (i+1) idxMap' bodyTy
+    pure $ Univ m lts' bind k bodyTy' s
+  _ -> pure typ
+  where f' = rawIndexTyVars i idxMap
+
+-- | Creates de-brujin indices for the type variables.
+indexTyVars :: Ty -> Tc Ty
+indexTyVars = rawIndexTyVars 0 M.empty
+
+-- | Fixes type variable indices across the term, including managing
+-- the incrementation due to Poly.
+indexTyVarsInTm :: Tm -> Tc Tm
+indexTyVarsInTm = g 0 M.empty where
+  g :: Int -> M.HashMap Text Int -> Tm -> Tc Tm
+  g i idxMap term = case term of
+    Case arg branches s -> do
+      let fBranch (CaseBranch sv svs t1) = CaseBranch sv svs <$> f t1
+      arg' <- f arg
+      branches' <- traverse fBranch branches
+      pure $ Case arg' branches' s
+    LetStruct v vs t1 t2 s -> do
+      t1' <- f t1
+      t2' <- f t2
+      pure $ LetStruct v vs t1' t2' s
+    Let v t1 t2 s -> do
+      t1' <- f t1
+      t2' <- f t2
+      pure $ Let v t1' t2' s
+    FunTm m mbAnno t1 s -> do
+      t1' <- f t1
+      mbAnno' <- traverse (rawIndexTyVars i idxMap) mbAnno
+      pure $ FunTm m mbAnno' t1' s
+    Poly mbAnno t1 s -> do
+      let idxMap' = case mbAnno of
+            Just (TyVarBinding name, _) -> M.insert name (i+1) idxMap
+            Nothing -> idxMap
+      t1' <- g (i+1) idxMap' t1
+      pure $ Poly mbAnno t1' s
+    AppTy t1 ty s -> do
+      t1' <- f t1
+      ty' <- rawIndexTyVars i idxMap ty
+      pure $ AppTy t1' ty' s
+    Drop v t1 s -> do
+      t1' <- f t1
+      pure $ Drop v t1' s
+    AppTm t1 t2 s -> do
+      t1' <- f t1
+      t2' <- f t2
+      pure $ AppTm t1' t2' s
+    RecFun xv fv t1 s -> do
+      t1' <- f t1
+      pure $ RecFun xv fv t1' s
+    Anno t1 ty s -> do
+      t1' <- f t1
+      ty' <- rawIndexTyVars i idxMap ty
+      pure $ Anno t1' ty' s
+    -- TmVar, TmCon, Copy, RefTm
+    _ -> pure term
+    where f = g i idxMap
+
+-- | Before introducing an argument of a given type, first make sure
+-- the type makes sense.
+sanityCheckType :: Ty -> Tc ()
+sanityCheckType ty = case ty of
+  TyCon v s -> void $ lookupDataType v s
+  LtOf v s -> void $ lookupEntry v s
+  FunTy _ aTy lts bTy _ -> f aTy *> f lts *> f bTy
+  LtJoin tys _ -> forM_ tys f
+  RefTy lt aTy _ -> f lt *> f aTy
+  Univ _ lts _ _ bodyTy _ -> f lts *> f bodyTy
+  _ -> pure ()
+  where f = sanityCheckType
+
+-- | Throws either `UnknownTermVar` or `RemovedTermVar`.
+expectedTermVar :: Var -> Span -> Tc a
+expectedTermVar v s = do
+  vl <- gets (.varLocs)
+  throwError $ case M.lookup v vl of
+    Just (_,Nothing) -> CompilerLogicError "varLocs not in synch with termVars" (Just s)
+    Just (_,Just removedSpan) -> RemovedTermVar s removedSpan
+    Nothing -> UnknownTermVar v s
+
 lookupEntry :: Var -> Span -> Tc (Int, Ty)
 lookupEntry v s = do
   tm <- gets (.termVars)
   case M.lookup v tm of
-    Nothing -> throwError $ UnknownTermVar v s
+    Nothing -> expectedTermVar v s
     Just e -> pure e
 
 lookupVar :: Var -> Span -> Tc Ty
@@ -154,8 +230,10 @@ addVar v s ty = do
         Nothing -> error "varLocs was not properly synched to varTerms"
         Just (def,_) -> pure def
       throwError $ VarAlreadyInScope v s def
-    Nothing -> put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
-                        ,varLocs=M.insert v (s,Nothing) ctx.varLocs}
+    Nothing -> do
+      sanityCheckType ty
+      put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
+               ,varLocs=M.insert v (s,Nothing) ctx.varLocs}
 
 -- | Get a list of explicitly mentioned variables in the lifetime.
 -- Ignores lifetime variables.
@@ -173,6 +251,13 @@ lifetimeVars ty = throwError $ ExpectedKind LtKind ty TyKind
 decrementLts :: Ty -> Tc ()
 decrementLts lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount (subtract 1))
 
+-- | Utility function that keeps varLocs in synch with termVars.
+deleteVar :: Var -> Span -> Tc ()
+deleteVar v s = modify' \c ->
+  c{termVars=M.delete v c.termVars
+   ,varLocs=M.adjust addDropLoc v c.varLocs}
+  where addDropLoc (s1,_) = (s1, Just s)
+
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
@@ -184,9 +269,7 @@ dropVar v s = do
     Univ Many l _ _ _ _ -> decrementLts l
     FunTy Many _ l _ _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
-  let addDropLoc (s1,_) = (s1, Just s)
-  modify' $ \c -> c{termVars=M.delete v c.termVars
-                   ,varLocs=M.adjust addDropLoc v c.varLocs}
+  deleteVar v s
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
@@ -218,14 +301,11 @@ useVar v s = do
       unless (borrowCount == 0) $ do
         borrowers <- variablesBorrowing v
         throwError $ CannotUseBorrowedVar v borrowers s
-      modify' $ onTermVars $ M.delete v
+      deleteVar v s
       pure ty
     Nothing -> case M.lookup v ctx.moduleTerms of
       Just ty -> pure ty
-      Nothing -> throwError $ case M.lookup v ctx.varLocs of
-        Just (_,Nothing) -> error "varLocs not in synch with termVars"
-        Just (_,Just dropSpan) -> DroppedTermVar s dropSpan
-        Nothing -> UnknownTermVar v s
+      Nothing -> expectedTermVar v s
 
 -- | Utility function for decrementing the borrow count of the referenced variable
 -- when we consume a reference term.
@@ -645,7 +725,9 @@ processDecl :: Decl -> Tc ()
 processDecl decl = case decl of
   FunDecl name ty body s -> do
     ctx <- get
-    check ty body
+    ty' <- indexTyVars ty
+    body' <- indexTyVarsInTm body
+    check ty' body'
     put ctx
     -- TODO: add check to make sure they're all multi-use
     addModuleFun s (Var name) ty

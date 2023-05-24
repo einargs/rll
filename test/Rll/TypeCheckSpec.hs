@@ -331,6 +331,69 @@ spec = do
         conStr y;
         |]
 
+    it "can catch an unbound type variable" do
+      baseFailTest (UnknownTypeVar "a" es) [txt|
+        test : &a Int -M[]> Int
+        = \r-> drop r in Int;
+        |]
+
+    it "can catch an unknown data type" do
+      baseFailTest (UnknownDataType (Var "Toxic") es) [txt|
+        test : Toxic -M[]> Toxic
+        = \t-> t;
+        |]
+
+    it "can catch an unbound term variable in a lifetime" do
+      baseFailTest (UnknownTermVar (Var "l") es) [txt|
+        test : &'l Int -M[]> Unit
+        = \r -> drop r in Unit;
+        |]
+
+    it "can catch a reference used after being dropped" do
+      baseFailTest (RemovedTermVar es es) [txt|
+        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+        = ^ l : Lifetime -> \r -> drop r in Int;
+
+        test : Int -M[]> Int
+        = \a -> let b = &a in
+        drop b in
+        let Int = copyInt ['a] b in
+        a;
+        |]
+
+    it "can catch applying a term argument instead of a type argument" do
+      baseFailTest (TyIsNotFun (tyCon "Int") es) [txt|
+        test : Unit -M[]> Unit
+        = \a -> let Int = Int Str in a;
+        |]
+
+    it "can catch using an already used variable" do
+      baseFailTest (RemovedTermVar es es) [txt|
+        test : Unit -M[]> Unit
+        = \a-> let Unit = a in a;
+        |]
+
+    it "can check applying two different type variables" do
+      baseTest [txt|
+        consume2Ref :
+          forall M [] l1 :Lifetime. forall M[] l2 : Lifetime.
+          &l1 Int -M[]> &l2 Str -S[]> Unit
+        = ^ ^ \ir -> \sr ->
+        drop ir in drop sr in
+        Unit;
+
+        test : Unit -M[]> Unit
+        = \a-> let i = Int in
+        let s = Str in
+        let Unit = ((((consume2Ref ['i])
+        : forall M [] l2 : Lifetime. &'i Int -M[]> &l2 Str -S[]> Unit)
+        ['s]) : &'i Int -M[]> &'s Str -S[]> Unit)
+          &i &s in
+        let Int = i in let Str = s in a;
+        |]
+
+
+
     -- it "" do
     --   baseTest [txt|
     --     test : Unit = Unit
