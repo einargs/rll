@@ -11,6 +11,20 @@ NEXT STEP: write tests for checking functions.
 - [ ] Allow me to ommit the empty lifetime brackets in functions.
 - [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
 
+# Compilation
+I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
+
+So closures will have a list of what they need to be able to hold -- both references and moved/consumed
+values.
+
+- [ ] I need to change how I handle Univ and Poly. Right now the hack to deal with a recursive
+  function that needs to be polymorphic is just awful. (I have to take a dummy parameter and return
+  the function.)
+  - I could make that kind of thing part of the recursive function definition. No, that
+    doesn't work because then how would normal functions work? I can't use a fix combinator.
+  - No, I could make a fix combinator that only works for mult stuff and just exposes it to the
+    internals?
+
 # Eventual Polish
 These are eventual things to do for polishing.
 - [X] Label all the parser nodes for better error messages.
@@ -45,7 +59,9 @@ Thoughts about various future features.
   function? I think that makes the most sense but it seems unintuitive.
 - [ ] To avoid having to write S and M for functions, I could have S be a `~>` and M `->`. Then
   make the lifetime list optional if it's empty.
+- [ ] Can I add an ability to "move" a multi-use function into a closure so that I can use it
+  without it being borrowed, but still have the closure type check as multi-use?
 
 # Notes
-- [ ] I can mimic cut in stuff by just using try on say the first part of a parser.
+- I can mimic cut in stuff by just using try on say the first part of a parser.
   See the funDecl parser.

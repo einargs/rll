@@ -59,6 +59,9 @@ data Span = Span
   }
   deriving Show
 
+instance Hashable Span where
+  hashWithSalt s _ = hashWithSalt s (0::Int)
+
 data SVar = SVar {var::Var, span::Span}
 
 instance Show SVar where

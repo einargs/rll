@@ -259,14 +259,62 @@ spec = do
         = fun f1 (x) x;
         |]
 
+    it "can check complex multi-argument functions with polymorphism" do
+      baseTest [txt|
+        copyInt1 :
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        copyInt2 :
+          Unit -M[]>
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = \x -> let Unit = x in ^ \r -> drop r in Int;
+
+        copyInt2e :
+          Unit -M[]>
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = \x -> let Unit = x in ^ l : Lifetime -> \r -> drop r in Int;
+
+        copyInt3 :
+          forall M [] l1 : Lifetime.
+          &l1 Unit -M[]>
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \x -> drop x in ^ \r -> drop r in Int;
+
+        copyInt3e :
+          forall M [] l1 : Lifetime.
+          &l1 Unit -M[]>
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^l1:Lifetime -> \x -> drop x in ^ l : Lifetime -> \r -> drop r in Int;
+
+        test : Unit
+        = let i = Int in
+        let u = Unit in
+        let Int = copyInt1 ['i] &i in
+        let Int = copyInt3e ['u] &u ['i] &i in
+        let Unit = u in
+        let Int = i in
+        Unit;
+        |]
+
     it "can check complex recursive functions" do
       baseTest [txt|
         enum Nat = Succ Nat | Zero;
 
         double : forall M [] l : Lifetime. &l Nat -M[]> Nat
-        = ^ l : Lifetime -> fun f (x) case x of
-        | Zero -> drop f in Zero
-        | Succ n -> Succ (Succ (f n));
+        = let wrap = (fun w (u)
+        let Unit = u in
+        let f = w Unit in
+        ^ l : Lifetime -> \ x -> case copy x of
+        | Zero -> Zero
+        | Succ n -> Succ (Succ (&f [l] n)))
+          : Unit -M[]> forall M [] l : Lifetime. &l Nat -M[]> Nat
+        in wrap Unit;
 
         add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
         = ^ l : Lifetime -> fun f (natRef) \nat ->
@@ -447,31 +495,33 @@ spec = do
           : Unit -M['i]> Int) in
         let Int = &f Unit in
         let Int = &f Unit in
-        drop f in
         drop ir in
+        drop f in
         let Int = i in
         Unit;
         |]
-      baseTest [txt|
+
+    it "can catch an incorrect borrow list" do
+      let lt s = LtOf (Var s) es
+          ty1 = LtJoin [lt "i", lt "s"] es
+          list = [lt "i"]
+      baseFailTest (IncorrectBorrowedVars ty1 list es) [txt|
         copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
         = ^ \r -> drop r in Int;
 
         test : Unit
         = let i = Int in
+        let s = Str in
         let ir = &i in
         let f = ((\u ->
           let Unit = u in
           copyInt ['i] copy ir)
-          : Unit -M['i]> Int) in
-        let Int = &f Unit in
-        let Int = &f Unit in
+          : Unit -M['i, 's]> Int) in
         drop ir in
         drop f in
         let Int = i in
         Unit;
         |]
-
-    -- TODO can catch an incorrect borrow list (too few & too many)
 
     it "Are borrow lists in returned functions checked" do
       -- TODO: once this checks rewrite it to cause an error I can make sure works.
@@ -498,9 +548,23 @@ spec = do
         |]
 
     -- TODO it "properly maintains borrow counts when returning univ and function types."
-    -- what happens if I put a type variable inside a variable type and then add another
-    -- type variable to the context? Since that type variable can't be updated, if it's
-    -- accessed later that would fuck things up, right?
+    it "shifts type variable indices for term variable types" do
+      -- Basically we're checking to make sure that if I have a type variable with index 0
+      -- in a variable's type, and then introduce a type binder, that variable is shifted
+      -- to account for the change.
+      baseTest [txt|
+        f : forall M [] t : Type.
+          t -M[]> forall S [] l : Lifetime.
+          &l t -S[]> t
+        = ^ t : Type -> \v -> ^ l : Lifetime ->
+        \ r -> drop r in v;
+
+        test : Unit -M[]> Unit
+        = \ a ->
+        let b = Unit in
+        let c = f [Unit] a ['b] &b in
+        let Unit = b in c;
+        |]
 
 
 

@@ -23,6 +23,7 @@ import qualified Debug.Trace as T
 import Data.List (find, foldl')
 import Safe (atMay)
 import Data.Maybe (mapMaybe)
+import Data.Foldable (foldlM)
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -87,8 +88,8 @@ indexTyVarsInTm = g 0 M.empty where
       t2' <- f t2
       pure $ Let v t1' t2' s
     FunTm m mbAnno t1 s -> do
-      t1' <- f t1
       mbAnno' <- traverse (rawIndexTyVars i idxMap) mbAnno
+      t1' <- f t1
       pure $ FunTm m mbAnno' t1' s
     Poly mbAnno t1 s -> do
       let idxMap' = case mbAnno of
@@ -108,7 +109,7 @@ indexTyVarsInTm = g 0 M.empty where
       t2' <- f t2
       pure $ AppTm t1' t2' s
     RecFun xv fv t1 s -> do
-      t1' <- f t1
+      t1' <- g (i+1) idxMap t1
       pure $ RecFun xv fv t1' s
     Anno t1 ty s -> do
       t1' <- f t1
@@ -243,44 +244,52 @@ lifetimeVars :: Ty -> Tc [Var]
 lifetimeVars = fmap ltSetToVars . lifetimeSet
 
 -- | A lifetime type reduced down to its essence.
-type LtSet = S.HashSet (Either TyVar Var)
+type LtSet = S.HashSet (Span, Either TyVar Var)
 
 -- | Convenience function for getting a list of variables from a lifetime set
 ltSetToVars :: LtSet -> [Var]
-ltSetToVars = mapMaybe f . S.toList where
+ltSetToVars = mapMaybe f . fmap snd . S.toList where
   f (Right v) = Just v
   f _ = Nothing
 
--- | Convert a lifetime set to an LtJoin with the given span.
-ltSetToTy :: Span -> LtSet -> Ty
-ltSetToTy s ltSet = LtJoin (fmap f $ S.toList ltSet) s where
-  f (Left x) = TyVar x s
-  f (Right v) = LtOf v s
+-- | Convert a lifetime set to a list of the lifetimes.
+ltSetToTypes :: LtSet -> [Ty]
+ltSetToTypes ltSet = fmap f $ S.toList ltSet where
+  f (s, Left x) = TyVar x s
+  f (s, Right v) = LtOf v s
 
 -- | Get a set of all unique variables and lifetime variables mentioned in
 -- the lifetime. This is the most granular set of lifetimes.
 lifetimeSet :: Ty -> Tc LtSet
-lifetimeSet (LtOf v s) = pure $ S.singleton $ Right v
+lifetimeSet (LtOf v s) = pure $ S.singleton $ (s, Right v)
 lifetimeSet (LtJoin ls s) = S.unions <$> traverse lifetimeSet ls
 lifetimeSet ty@(TyVar x s) = do
   k <- lookupKind x s
   case k of
     -- TODO: make sure there's no problem with ignoring variables.
-    LtKind -> pure $ S.singleton $ Left x
+    LtKind -> pure $ S.singleton $ (s, Left x)
     TyKind -> throwError $ ExpectedKind LtKind ty TyKind
 lifetimeSet ty = throwError $ ExpectedKind LtKind ty TyKind
 
--- | Get a set of all lifetimes mentioned in a type.
-ltsInTy :: Ty -> LtSet
-ltsInTy typ = S.fromList $ f typ [] where
+-- | Get a set of all lifetimes mentioned in a type relative to the context.
+--
+-- It's important that the context type variable indices line up with those
+-- in the type.
+ltsInTy :: Ctx -> Ty -> LtSet
+ltsInTy ctx typ = S.fromList $ f typ [] where
   f ty l = case ty of
-    LtOf v _ -> Right v:l
-    TyVar tv _ -> Left tv:l
+    LtOf v s -> (s, Right v ):l
+    TyVar tv s -> case getKind tv of
+      LtKind -> (s, Left tv ):l
+      TyKind -> l
     RefTy t1 t2 _ -> f t1 $ f t2 l
     LtJoin tys _ -> foldl' (flip f) l tys
-    FunTy _ t1 t2 t3 _ -> f t1 $ f t2 $ f t3 l
-    Univ _ t1 _ _ t2 _ -> f t1 $ f t2 l
+    FunTy _ t1 t2 t3 _ -> f t2 l
+    Univ _ t1 _ _ t2 _ -> f t1 l
     _ -> l
+  getKind (MkTyVar _ i) = case atMay ctx.localTypeVars i of
+    Just k -> k
+    Nothing -> error "Should have been caught already"
 
 -- | Get all lifetimes implied by borrows and copies inside a closure.
 --
@@ -297,13 +306,13 @@ ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
     Poly _ t1 _ -> g (i+1) t1 l
     TmVar _ _ -> l
     TmCon _ _ -> l
-    Copy v _ -> case M.lookup v ctx.termVars of
-      Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> Right v:l
-      Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> Left x:l
+    Copy v s -> case M.lookup v ctx.termVars of
+      Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> (s, Right v ):l
+      Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> (s, Left x ):l
       Just (_,RefTy (LtJoin _ _) _ _) ->
         error "should have been caught before now"
       _ -> l
-    RefTm v s -> if M.member v ctx.termVars then Right v:l else l
+    RefTm v s -> if M.member v ctx.termVars then (s, Right v ):l else l
     AppTy t1 _ _ -> f t1 l
     Drop _ t1 _ -> f t1 l
     AppTm t1 t2 _ -> f t2 $ f t1 l
@@ -315,7 +324,7 @@ ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
 ltsInConsumed :: Ctx -> Ctx -> LtSet
 ltsInConsumed c1 c2 = S.unions ltSets where
   diff = M.difference c1.termVars c2.termVars
-  ltSets = ltsInTy . snd <$> M.elems diff
+  ltSets = ltsInTy c1 . snd <$> M.elems diff
 
 -- | Infer the lifetimes for a closure type.
 ltsForClosure :: Ctx -> Ctx -> Tm -> LtSet
@@ -352,7 +361,14 @@ dropVar v s = do
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
-isTyBorrowing v1 ty = S.member (Right v1) $ ltsInTy ty
+isTyBorrowing v1 ty = case ty of
+    LtOf v _ -> v == v1
+    RefTy t1 t2 _ -> f t1 || f t2
+    LtJoin tys _ -> any f tys
+    FunTy _ t1 t2 t3 _ -> f t1 || f t2 || f t3
+    Univ _ t1 _ _ t2 _ -> f t1 || f t2
+    _ -> False
+    where f = isTyBorrowing v1
 
 -- | Get a list of all variables that reference the argument
 -- in their type.
@@ -414,12 +430,15 @@ withKind :: Kind -> Tc a -> Tc a
 withKind k m = do
   ctx <- get
   let tvList = ctx.localTypeVars
-  put $ ctx {localTypeVars=k:tvList }
+  let shiftedTermVars = shiftTermTypes 1 ctx.termVars
+  put $ ctx { termVars=shiftedTermVars, localTypeVars=k:tvList }
   val <- m
   ctx2 <- get
+  let unshiftedTermVars = shiftTermTypes (-1) ctx2.termVars
   unless (k:tvList == ctx2.localTypeVars) $ error "failed to drop a type variable"
-  put $ ctx2{localTypeVars=tvList}
+  put $ ctx2{termVars=unshiftedTermVars, localTypeVars=tvList}
   pure val
+  where shiftTermTypes i = M.map (second $ rawTypeShift i 0)
 
 -- | Verify that no variables that should be handled inside a scope are escaping.
 --
@@ -476,6 +495,19 @@ toRef :: Span -> Ty -> Ty -> Ty
 toRef s lt ty@(RefTy _ _ _) = ty
 toRef s lt ty = RefTy lt ty s
 
+rawTypeShift :: Int -> Int -> Ty -> Ty
+rawTypeShift i c ty = case ty of
+  TyVar (MkTyVar t n) s -> TyVar (MkTyVar t $ if n < c then n else n+i) s
+  FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
+  LtJoin ts s -> LtJoin (f <$> ts) s
+  RefTy a b s -> RefTy (f a) (f b) s
+  Univ m lts v k body s -> Univ m (f lts) v k (rawTypeShift i (c+1) body) s
+  _ -> ty
+  where f = rawTypeShift i c
+
+typeShift :: Ty -> Ty
+typeShift = rawTypeShift 1 0
+
 -- TODO rewrite a bunch of this using recursion schemes.
 -- | Do type substitution on the body of a Univ type.
 typeSub :: Ty -> Ty -> Ty
@@ -483,23 +515,15 @@ typeSub = sub 0
   where
     sub :: Int -> Ty -> Ty -> Ty
     sub xi arg target = case target of
-      -- TODO check if I can optimize by only shifting when I replace with the arg.
+      -- TODO check if I can optimize by only shifting when I replace with the arg and adjusting
+      -- the counters.
       TyVar v@(MkTyVar _ vi) s -> if vi == xi then arg else TyVar v s
       FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
       LtJoin ts s -> LtJoin (f <$> ts) s
       RefTy a b s -> RefTy (f a) (f b) s
-      Univ m lts v k body s -> Univ m (f lts) v k (sub (xi+1) (shift 1 0 arg) body) s
+      Univ m lts v k body s -> Univ m (f lts) v k (sub (xi+1) (rawTypeShift 1 0 arg) body) s
       _ -> target
       where f = sub xi arg
-    shift :: Int -> Int -> Ty -> Ty
-    shift i c ty = case ty of
-      TyVar (MkTyVar t n) s -> TyVar (MkTyVar t $ if n < c then n else n+i) s
-      FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
-      LtJoin ts s -> LtJoin (f <$> ts) s
-      RefTy a b s -> RefTy (f a) (f b) s
-      Univ m lts v k body s -> Univ m (f lts) v k (shift i (c+1) body) s
-      _ -> ty
-      where f = shift i c
 
 -- | Borrow part of a data structure.
 --
@@ -630,7 +654,7 @@ mkClosureSynth s body m = do
   startCtx <- get
   out <- m
   endCtx <- get
-  let lts = ltSetToTy s $ ltsForClosure startCtx endCtx body
+  let lts = flip LtJoin s $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s startCtx endCtx
   vars <- lifetimeVars lts
@@ -657,7 +681,7 @@ verifyBorrows s startCtx endCtx lts body = do
   let vars = ltSetToVars inferredLtSet
   -- TODO: upgrade to list variables.
   unless (ltsSet == inferredLtSet) $ throwError $
-    IncorrectBorrowedVars lts (ltSetToTy s inferredLtSet) s
+    IncorrectBorrowedVars lts (ltSetToTypes inferredLtSet) s
   forM_ vars $ flip alterBorrowCount (+1)
   where
     inferredLtSet = ltsForClosure startCtx endCtx body

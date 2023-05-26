@@ -99,7 +99,7 @@ data TyErr
   -- | Inferred borrowed variables does not match specified borrowed variables.
   --
   -- Type specifying borrowed variables, list of variables, closure span
-  | IncorrectBorrowedVars Ty Ty Span
+  | IncorrectBorrowedVars Ty [Ty] Span
   -- | Attempted to copy a variable that is not a reference.
   --
   -- Type of variable, span of copy.
@@ -228,13 +228,22 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
 
     IncorrectBorrowedVars borrowedTy inferredLts s ->
       let tySpan = getSpan borrowedTy
-          inferMsg = "inferred borrow list: " <> tshow inferredLts
+          inferListTxt = "inferred borrow list: " <> tshow inferredLts
+          headerMsg = T.unwords ["inferred borrow list", tshow inferredLts,
+                                 "did not match specified borrow list."]
           specMsg = "borrow list specified here:"
+          funcBody = "in function body"
+          f :: Ty -> E.Block
+          f ty = defBlock s (Just msg) (defaultSpanToPtrs s) Nothing
+            where s = getSpan ty
+                  msg = "inferrred " <> tshow ty <> " from:"
+          inferredLocs = f <$> inferredLts
       in E.Errata
-        (Just "inferred borrow list did not match specified borrow list")
-        [ highlightBlock s (Just inferMsg) (defaultSpanToPtrs s) Nothing
-        , defBlock tySpan (Just specMsg) (defaultSpanToPtrs tySpan) Nothing
-        ]
+        (Just headerMsg)
+        ([ highlightBlock s (Just funcBody) (defaultSpanToPtrs s) Nothing
+        ] <> inferredLocs <> [
+          defBlock tySpan (Just specMsg) (defaultSpanToPtrs tySpan) Nothing
+        ])
         Nothing
 
     WrongConstructor incorrectCon correctCon tyName expSpan ->

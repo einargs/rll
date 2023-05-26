@@ -116,6 +116,12 @@ spec = do
     it "parses a polymorphic type" do
       let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
       t `tyFrom` "forall S ['x,'y] a : Type. Unit"
+    it "ignores block comments" do
+      let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
+      t `tyFrom` "forall S ['x,'y] /*THIS IS A COMMENT*/ a : Type. Unit"
+    it "ignores line comments" do
+      let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
+      t `tyFrom` "forall S ['x,'y]a : Type. Unit // COMMENT"
     it "throws an error for nonsense" do
       parseShouldError ty "!@#@! "
   describe "decl" do
