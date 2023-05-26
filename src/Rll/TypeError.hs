@@ -99,7 +99,7 @@ data TyErr
   -- | Inferred borrowed variables does not match specified borrowed variables.
   --
   -- Type specifying borrowed variables, list of variables, closure span
-  | IncorrectBorrowedVars Ty [Var] Span
+  | IncorrectBorrowedVars Ty Ty Span
   -- | Attempted to copy a variable that is not a reference.
   --
   -- Type of variable, span of copy.
@@ -226,9 +226,9 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       (defaultSpanToPtrs s)
       (Just $ "Borrowed by: " <> varList borrowers)
 
-    IncorrectBorrowedVars borrowedTy inferredVars s ->
+    IncorrectBorrowedVars borrowedTy inferredLts s ->
       let tySpan = getSpan borrowedTy
-          inferMsg = "inferred borrow list: " <> varList inferredVars
+          inferMsg = "inferred borrow list: " <> tshow inferredLts
           specMsg = "borrow list specified here:"
       in E.Errata
         (Just "inferred borrow list did not match specified borrow list")

@@ -26,11 +26,20 @@ instance Show TyVar where
 instance Eq TyVar where
   (MkTyVar _ i) == (MkTyVar _ j) = i == j
 
+instance Ord TyVar where
+  compare (MkTyVar _ i) (MkTyVar _ j) = compare i j
+
+instance Hashable TyVar where
+  hashWithSalt s (MkTyVar _ i) = hashWithSalt s i
+
 newtype TyVarBinding = TyVarBinding {name::Text}
   deriving Show
 
 instance Eq TyVarBinding where
   _ == _ = True
+
+instance Ord TyVarBinding where
+  compare _ _ = EQ
 
 data EnumCon = EnumCon Text [Ty]
   deriving (Show, Eq)
@@ -60,6 +69,9 @@ instance Eq SVar where
 
 instance Eq Span where
   _ == _ = True
+
+instance Ord Span where
+  compare _ _ = EQ
 
 data Kind
   = TyKind

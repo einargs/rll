@@ -166,7 +166,7 @@ spec = do
         consumeISR :
           forall M [] l1 : Lifetime .
           forall S [] l2 : Lifetime .
-          &l1 Int -S[]> &l2 Str -S[]> Unit
+          &l1 Int -S[]> &l2 Str -S[l1]> Unit
         = ^ l1 : Lifetime -> ^ l2 : Lifetime -> \ir -> \sr ->
         drop ir in drop sr in Unit;
 
@@ -377,7 +377,7 @@ spec = do
       baseTest [txt|
         consume2Ref :
           forall M [] l1 :Lifetime. forall M[] l2 : Lifetime.
-          &l1 Int -M[]> &l2 Str -S[]> Unit
+          &l1 Int -M[]> &l2 Str -S[l1]> Unit
         = ^ ^ \ir -> \sr ->
         drop ir in drop sr in
         Unit;
@@ -386,11 +386,121 @@ spec = do
         = \a-> let i = Int in
         let s = Str in
         let Unit = ((((consume2Ref ['i])
-        : forall M [] l2 : Lifetime. &'i Int -M[]> &l2 Str -S[]> Unit)
-        ['s]) : &'i Int -M[]> &'s Str -S[]> Unit)
+        : forall M [] l2 : Lifetime. &'i Int -M[]> &l2 Str -S['i]> Unit)
+        ['s]) : &'i Int -M[]> &'s Str -S['i]> Unit)
           &i &s in
         let Int = i in let Str = s in a;
         |]
+
+    it "can avoid free variable capture in type substitution" do
+      baseTest [txt|
+        id : forall M [] t : Type. t -M[]> t
+        = ^ \a -> a;
+
+        test : forall M [] t : Type. t -M[]> t
+        = ^ t : Type -> \a ->
+        let b = id [&'a t] &a in
+        drop b in a;
+        |]
+
+    it "can use a local multi-use function through references" do
+      baseTest [txt|
+        test : Unit
+        = let f = \a:Unit -> a in
+        let Unit = &f Unit in
+        let Unit = &f Unit in
+        drop f in
+        Unit;
+        |]
+
+
+    it "can check directly borrowing an external variable" do
+      baseTest [txt|
+        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        test : Unit
+        = let i = Int in
+        let f = ((\u ->
+          let Unit = u in
+          copyInt ['i] &i)
+          : Unit -M['i]> Int) in
+        let i1 = &f Unit in
+        let i2 = &f Unit in
+        let Int = i1 in let Int = i2 in
+        drop f in
+        let Int = i in
+        Unit;
+        |]
+
+    it "can check directly copying an external variable" do
+      baseTest [txt|
+        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        test : Unit
+        = let i = Int in
+        let ir = &i in
+        let f = ((\u ->
+          let Unit = u in
+          copyInt ['i] copy ir)
+          : Unit -M['i]> Int) in
+        let Int = &f Unit in
+        let Int = &f Unit in
+        drop f in
+        drop ir in
+        let Int = i in
+        Unit;
+        |]
+      baseTest [txt|
+        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        test : Unit
+        = let i = Int in
+        let ir = &i in
+        let f = ((\u ->
+          let Unit = u in
+          copyInt ['i] copy ir)
+          : Unit -M['i]> Int) in
+        let Int = &f Unit in
+        let Int = &f Unit in
+        drop ir in
+        drop f in
+        let Int = i in
+        Unit;
+        |]
+
+    -- TODO can catch an incorrect borrow list (too few & too many)
+
+    it "Are borrow lists in returned functions checked" do
+      -- TODO: once this checks rewrite it to cause an error I can make sure works.
+      baseTest [txt|
+        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        mkCopier : forall M [] l : Lifetime.
+          &l Int -M[]> Unit -M[l]> Int
+        = ^l:Lifetime -> \r->
+        let f = (\u:Unit -> let Unit = u in copyInt [l] (copy r)) in
+        drop r in f;
+
+        test : Unit -M[]> Unit
+        = \a ->
+        let i = Int in
+        let cp = mkCopier ['i] &i in
+        let i1 = &cp Unit in
+        let i2 = &cp Unit in
+        let Int = i1 in let Int = i2 in
+        drop cp in
+        let Int = i in
+        a;
+        |]
+
+    -- TODO it "properly maintains borrow counts when returning univ and function types."
+    -- what happens if I put a type variable inside a variable type and then add another
+    -- type variable to the context? Since that type variable can't be updated, if it's
+    -- accessed later that would fuck things up, right?
 
 
 

@@ -11,6 +11,7 @@ import qualified Data.IntMap as IM
 import qualified Data.IntSet as IS
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
+import qualified Data.Set as TS
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Data.Maybe (fromMaybe)
@@ -21,6 +22,7 @@ import qualified Data.List as L
 import qualified Debug.Trace as T
 import Data.List (find, foldl')
 import Safe (atMay)
+import Data.Maybe (mapMaybe)
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -39,7 +41,7 @@ evalTc ctx = fmap fst . runTc ctx
 rawIndexTyVars :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
 rawIndexTyVars i idxMap typ = case typ of
   TyVar (MkTyVar name _) s -> case M.lookup name idxMap of
-    Just i' -> T.trace (unpack name <> "@" <> (show $ i-i'))$ pure $ TyVar (MkTyVar name $ i-i') s
+    Just i' -> pure $ TyVar (MkTyVar name $ i-i') s
     Nothing -> throwError $ UnknownTypeVar name s
   FunTy m aTy lts bTy s -> do
     aTy' <- f' aTy
@@ -238,18 +240,95 @@ addVar v s ty = do
 -- | Get a list of explicitly mentioned variables in the lifetime.
 -- Ignores lifetime variables.
 lifetimeVars :: Ty -> Tc [Var]
-lifetimeVars (LtOf v s) = pure [v]
-lifetimeVars (LtJoin ls s) = concat <$> traverse lifetimeVars ls
-lifetimeVars ty@(TyVar x s) = do
+lifetimeVars = fmap ltSetToVars . lifetimeSet
+
+-- | A lifetime type reduced down to its essence.
+type LtSet = S.HashSet (Either TyVar Var)
+
+-- | Convenience function for getting a list of variables from a lifetime set
+ltSetToVars :: LtSet -> [Var]
+ltSetToVars = mapMaybe f . S.toList where
+  f (Right v) = Just v
+  f _ = Nothing
+
+-- | Convert a lifetime set to an LtJoin with the given span.
+ltSetToTy :: Span -> LtSet -> Ty
+ltSetToTy s ltSet = LtJoin (fmap f $ S.toList ltSet) s where
+  f (Left x) = TyVar x s
+  f (Right v) = LtOf v s
+
+-- | Get a set of all unique variables and lifetime variables mentioned in
+-- the lifetime. This is the most granular set of lifetimes.
+lifetimeSet :: Ty -> Tc LtSet
+lifetimeSet (LtOf v s) = pure $ S.singleton $ Right v
+lifetimeSet (LtJoin ls s) = S.unions <$> traverse lifetimeSet ls
+lifetimeSet ty@(TyVar x s) = do
   k <- lookupKind x s
   case k of
     -- TODO: make sure there's no problem with ignoring variables.
-    LtKind -> pure []
+    LtKind -> pure $ S.singleton $ Left x
     TyKind -> throwError $ ExpectedKind LtKind ty TyKind
-lifetimeVars ty = throwError $ ExpectedKind LtKind ty TyKind
+lifetimeSet ty = throwError $ ExpectedKind LtKind ty TyKind
+
+-- | Get a set of all lifetimes mentioned in a type.
+ltsInTy :: Ty -> LtSet
+ltsInTy typ = S.fromList $ f typ [] where
+  f ty l = case ty of
+    LtOf v _ -> Right v:l
+    TyVar tv _ -> Left tv:l
+    RefTy t1 t2 _ -> f t1 $ f t2 l
+    LtJoin tys _ -> foldl' (flip f) l tys
+    FunTy _ t1 t2 t3 _ -> f t1 $ f t2 $ f t3 l
+    Univ _ t1 _ _ t2 _ -> f t1 $ f t2 l
+    _ -> l
+
+-- | Get all lifetimes implied by borrows and copies inside a closure.
+--
+-- Context is the closure entrance context. Used to make sure
+-- we only return lifetimes external to the closure.
+ltsBorrowedIn :: Ctx -> Tm -> LtSet
+ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
+  -- | `i` is the threshold counter used for telling which type variable is local.
+  g i tm l = case tm of
+    Case arg branches _ -> f arg $ foldl' (\l' (CaseBranch _ _ body) -> f body l') l branches
+    LetStruct _ _ t1 t2 _ -> f t2 $ f t1 l
+    Let _ t1 t2 _ -> f t2 $ f t1 l
+    FunTm _ _ t1 _ -> f t1 l
+    Poly _ t1 _ -> g (i+1) t1 l
+    TmVar _ _ -> l
+    TmCon _ _ -> l
+    Copy v _ -> case M.lookup v ctx.termVars of
+      Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> Right v:l
+      Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> Left x:l
+      Just (_,RefTy (LtJoin _ _) _ _) ->
+        error "should have been caught before now"
+      _ -> l
+    RefTm v s -> if M.member v ctx.termVars then Right v:l else l
+    AppTy t1 _ _ -> f t1 l
+    Drop _ t1 _ -> f t1 l
+    AppTm t1 t2 _ -> f t2 $ f t1 l
+    RecFun _ _ t1 _ -> f t1 l
+    Anno t1 _ _ -> f t1 l
+    where f = g i
+
+-- | Infer the lifetimes mentioned in the types of all consumed values.
+ltsInConsumed :: Ctx -> Ctx -> LtSet
+ltsInConsumed c1 c2 = S.unions ltSets where
+  diff = M.difference c1.termVars c2.termVars
+  ltSets = ltsInTy . snd <$> M.elems diff
+
+-- | Infer the lifetimes for a closure type.
+ltsForClosure :: Ctx -> Ctx -> Tm -> LtSet
+ltsForClosure c1 c2 tm = S.union (ltsInConsumed c1 c2) $ ltsBorrowedIn c1 tm
+
+adjustLts :: (Int -> Int) -> Ty -> Tc ()
+adjustLts f lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount f)
 
 decrementLts :: Ty -> Tc ()
-decrementLts lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount (subtract 1))
+decrementLts = adjustLts $ subtract 1
+
+incrementLts :: Ty -> Tc ()
+incrementLts = adjustLts (+1)
 
 -- | Utility function that keeps varLocs in synch with termVars.
 deleteVar :: Var -> Span -> Tc ()
@@ -273,14 +352,7 @@ dropVar v s = do
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
-isTyBorrowing v1 ty = case ty of
-  LtOf v _ -> v == v1
-  RefTy t1 t2 _ -> f t1 || f t2
-  LtJoin tys _ -> any f tys
-  FunTy _ t1 t2 t3 _ -> f t1 || f t2 || f t3
-  Univ _ t1 _ _ t2 _ -> f t1 || f t2
-  _ -> False
-  where f = isTyBorrowing v1
+isTyBorrowing v1 ty = S.member (Right v1) $ ltsInTy ty
 
 -- | Get a list of all variables that reference the argument
 -- in their type.
@@ -298,6 +370,7 @@ useVar v s = do
   ctx <- get
   case M.lookup v ctx.termVars of
     Just (borrowCount, ty) -> do
+      when (borrowCount < 0) $ throwError $ CompilerLogicError "subzero borrow count" (Just s)
       unless (borrowCount == 0) $ do
         borrowers <- variablesBorrowing v
         throwError $ CannotUseBorrowedVar v borrowers s
@@ -313,7 +386,28 @@ useRef :: Ty -> Tc ()
 useRef ty = do
   case ty of
     RefTy l _ _ -> decrementLts l
+    -- This should be decrementing function borrows right
     _ -> pure ()
+
+-- | This is an additional check to catch compiler logic errors. It is
+-- not enough on it's own.
+--
+-- Essentially, when using a function of any kind, this checks to make sure
+-- all of the variables in the borrow list exist.
+checkBorrowList :: Ty -> Span -> Tc ()
+checkBorrowList ty s = do
+  vars <- lifetimeVars ty
+  vm <- gets (.termVars)
+  unless (all (flip M.member vm) vars) $ throwError $
+    CompilerLogicError "not all variables in borrow list are in scope" (Just s)
+
+-- | Used to increment borrow counts if the return of a function increments them.
+incRef :: Ty -> Tc ()
+incRef ty = case ty of
+  RefTy l _ _ -> incrementLts l
+  FunTy _ _ lts _ _ -> incrementLts lts
+  Univ _ lts _ _ _ _ -> incrementLts lts
+  _ -> pure ()
 
 -- | Utility function to add and drop kinds from the type context automatically.
 withKind :: Kind -> Tc a -> Tc a
@@ -389,6 +483,7 @@ typeSub = sub 0
   where
     sub :: Int -> Ty -> Ty -> Ty
     sub xi arg target = case target of
+      -- TODO check if I can optimize by only shifting when I replace with the arg.
       TyVar v@(MkTyVar _ vi) s -> if vi == xi then arg else TyVar v s
       FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
       LtJoin ts s -> LtJoin (f <$> ts) s
@@ -500,36 +595,10 @@ letClause s x t1 t2 f = do
   addVar x s xTy
   f t2
 
--- | Context is the closure entrance context. Used to make sure
--- we only return variables external to the closure.
-varsBorrowedIn :: Ctx -> Tm -> [Var]
-varsBorrowedIn ctx tm = L.nub $ f tm [] where
-  f tm l = case tm of
-    Case arg branches _ -> f arg $ foldl' (\l' (CaseBranch _ _ body) -> f body l') l branches
-    LetStruct _ _ t1 t2 _ -> f t2 $ f t1 l
-    Let _ t1 t2 _ -> f t2 $ f t1 l
-    FunTm _ _ t1 _ -> f t1 l
-    Poly _ t1 _ -> f t1 l
-    TmVar _ _ -> l
-    TmCon _ _ -> l
-    Copy _ _ -> l
-    RefTm v _ -> if M.member v ctx.termVars then v:l else l
-    AppTy t1 _ _ -> f t1 l
-    Drop _ t1 _ -> f t1 l
-    AppTm t1 t2 _ -> f t2 $ f t1 l
-    RecFun _ _ t1 _ -> f t1 l
-    Anno t1 _ _ -> f t1 l
-
 -- | Given an entrance and exit context, we see which variables in the
 -- entrance are no longer in the exit context (and thus have been consumed).
 consumedVars :: Ctx -> Ctx -> [Var]
 consumedVars c1 c2 = M.keys $ M.difference c1.termVars c2.termVars
-{-
-consumedVars c1 c2 = if M.isSubmapOfBy (const $ const True) m c1.varNames
-  then fmap (uncurry $ flip Var) $ M.assocs $ M.difference c1.varNames m
-  else error "Variable names map did not contain name for consumed variable"
-  where m = M.difference c1.termCtx c2.termCtx
--}
 
 findMult :: Ctx -> Ctx -> Mult
 findMult c1 c2 = if [] /= cv then Single else Many where
@@ -561,10 +630,10 @@ mkClosureSynth s body m = do
   startCtx <- get
   out <- m
   endCtx <- get
-  let vars = varsBorrowedIn startCtx body
-      lts = LtJoin (flip LtOf s <$> vars) s
+  let lts = ltSetToTy s $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s startCtx endCtx
+  vars <- lifetimeVars lts
   forM_ vars $ flip alterBorrowCount (+1)
   pure $ (lts, mult, out)
 
@@ -582,15 +651,16 @@ synthPoly s b kind body = do
   pure $ Univ mult lts b kind bodyTy s
 
 -- | Helper for verifying that borrowed variables are correct for the closure.
-verifyBorrows :: Span -> Ctx -> Ty -> Tm -> Tc ()
-verifyBorrows s ctx lts body = do
-  ltsSet <- S.fromList <$> lifetimeVars lts
+verifyBorrows :: Span -> Ctx -> Ctx -> Ty -> Tm -> Tc ()
+verifyBorrows s startCtx endCtx lts body = do
+  ltsSet <- lifetimeSet lts
+  let vars = ltSetToVars inferredLtSet
   -- TODO: upgrade to list variables.
-  unless (ltsSet == varSet) $ throwError $ IncorrectBorrowedVars lts vars s
+  unless (ltsSet == inferredLtSet) $ throwError $
+    IncorrectBorrowedVars lts (ltSetToTy s inferredLtSet) s
   forM_ vars $ flip alterBorrowCount (+1)
   where
-    vars = varsBorrowedIn ctx body
-    varSet = S.fromList vars
+    inferredLtSet = ltsForClosure startCtx endCtx body
 
 -- | Helper for building closure checks.
 mkClosureCheck :: Span -> Tm -> Mult -> Ty -> Tc () -> Tc ()
@@ -600,7 +670,7 @@ mkClosureCheck s body mult lts m = do
   endCtx <- get
 
   -- Check specified lifetimes
-  verifyBorrows s startCtx lts body
+  verifyBorrows s startCtx endCtx lts body
 
   -- Check multiplicity if Many is specified
   verifyMult s mult startCtx endCtx
@@ -663,21 +733,27 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
     t1Ty <- synth t1
     case t1Ty of
       FunTy Single aTy lts bTy _ -> do
+        checkBorrowList lts s
         check aTy t2
         useRef aTy
         decrementLts lts
+        incRef bTy
         pure bTy
       -- TODO: original plan called for only being able to call multi-use functions
       -- through references, but is that really a useful distinction?
       FunTy Many aTy lts bTy _ -> do
+        checkBorrowList lts s
         check aTy t2
         useRef aTy
         decrementLts lts
+        incRef bTy
         pure bTy
       RefTy lt (FunTy Many aTy lts bTy _) _ -> do
+        checkBorrowList lts s
         check aTy t2
         useRef aTy
         useRef t1Ty
+        incRef bTy
         pure bTy
       _ -> throwError $ TyIsNotFun t1Ty s
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
@@ -695,6 +771,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
   FunTm v mbVTy body s ->
     case ty of
       FunTy m aTy lts bTy _ -> do
+        checkBorrowList lts s
         case mbVTy of
           Just vTy -> unless (vTy == aTy) $ throwError $ ExpectedType aTy vTy
           Nothing -> pure ()
@@ -703,6 +780,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
   Poly mbBind body s1 ->
     case ty of
       Univ m lts b2 k2 bodyTy s2 -> do
+        checkBorrowList lts s1
         forM_ mbBind \(b1,k1) -> do
           -- TODO I don't know if this should check text name.
           unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
@@ -712,6 +790,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
   RecFun x funVar body s1 ->
     case ty of
       FunTy m xTy lts bodyTy s2 -> do
+        checkBorrowList lts s1
         when (m == Single) $ throwError $ RecFunIsNotSingle s1 s2
         checkRecFun s1 x funVar body xTy lts bodyTy
       _ -> throwError $ ExpectedFunType ty s1
@@ -730,7 +809,7 @@ processDecl decl = case decl of
     check ty' body'
     put ctx
     -- TODO: add check to make sure they're all multi-use
-    addModuleFun s (Var name) ty
+    addModuleFun s (Var name) ty'
   StructDecl name args s -> do
     addDataType (Var name) $ StructType name args s
   EnumDecl tyName enumCons s -> do

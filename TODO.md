@@ -1,5 +1,7 @@
 NEXT STEP: write tests for checking functions.
 
+- [ ] I also have to run a check to add the lifetimes in any variables consumed
+  by a closure.
 - [X] Change case statements to infer whether they're working on a reference or not.
 - [X] Write a pass that goes through and assigns de-brujin indices.
 - [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
@@ -11,7 +13,10 @@ NEXT STEP: write tests for checking functions.
 
 # Eventual Polish
 These are eventual things to do for polishing.
-- [ ] Label all the parser nodes for better error messages.
+- [X] Label all the parser nodes for better error messages.
+- [ ] Avoid calculating difference between entrance and exit scopes twice for mult and consumed
+  variables.
+- [ ] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
 - [ ] Add test code to specifically check that the correct errors are triggered at the right spots.
 - [ ] Remove excess `try` in the parser. Probably take it out of branch and then manually
   add try where necessary.
@@ -38,6 +43,8 @@ Thoughts about various future features.
 - [ ] The idea of being able to slice arrays into pieces and work on those.
 - [ ] How do I handle a top level bare term that isn't a function? Do I make it a zero argument
   function? I think that makes the most sense but it seems unintuitive.
+- [ ] To avoid having to write S and M for functions, I could have S be a `~>` and M `->`. Then
+  make the lifetime list optional if it's empty.
 
 # Notes
 - [ ] I can mimic cut in stuff by just using try on say the first part of a parser.
