@@ -10,6 +10,9 @@ NEXT STEP: write tests for checking functions.
 - [ ] check to make sure all top level functions are multi-use.
 - [ ] Allow me to ommit the empty lifetime brackets in functions.
 - [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
+- [ ] I do actually need the lifetime for the recursive function? No, I can make it static
+  and rely on the lts to do that for me.
+  - [ ] Go through and fix any code assuming that references can't have LtJoin as their lifetimes.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.

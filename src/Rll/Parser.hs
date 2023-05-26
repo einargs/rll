@@ -109,16 +109,16 @@ polyw = keyword "^"
 copyw = keyword "copy"
 refw = keyword "&"
 dropw = keyword "drop"
-recfunw = keyword "fun"
 commaw = keyword ","
 enumw = keyword "enum"
 structw = keyword "struct"
 forallw = keyword "forall"
 dotw = keyword "."
 semicolonw = keyword ";"
+recw = keyword "rec"
 
 keywords :: [Text]
-keywords = ["let", "in", "case", "copy", "drop", "fun", "enum", "forall", "struct", "of"]
+keywords = ["let", "in", "case", "copy", "drop", "rec", "enum", "forall", "struct", "of"]
 
 spanTo :: Spans a => SourcePos -> a -> Span
 spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = unPos sl, startColumn = unPos sc}
@@ -201,7 +201,7 @@ tm = choice [apps, anno, subTm]
   where
     subTm = choice [paren, caseTm, letStruct,
              tmVar, tmCon, copy, refTm, drop,
-             recFun, letVar, funTm, poly]
+             fixTm, letVar, funTm, poly]
     paren = branch "term parentheses" $ lexeme $ C.char '(' *> space *> tm <* C.char ')'
     caseBranch = label "case branch" do
       barw
@@ -310,15 +310,13 @@ tm = choice [apps, anno, subTm]
       args <- some subTm
       let f l r = AppTm l r $ s1 `spanTo` r
       pure $ foldl' f t1 args
-    recFun = label "recursive function" do
+    fixTm = label "recursive function" do
       s1 <- getSourcePos
-      recfunw
+      recw
       funVar <- lowerSVar
-      keyword "("
-      arg <- lowerSVar
-      keyword ")"
+      arroww
       body <- tm
-      pure $ RecFun arg funVar body $ s1 `spanTo` body
+      pure $ FixTm funVar body $ s1 `spanTo` body
     anno = branch "type annotation" do
       s1 <- getSourcePos
       term <- subTm

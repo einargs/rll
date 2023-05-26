@@ -80,8 +80,9 @@ spec = do
     it "parses function application" do
       AppTm (tmVar "x") (tmVar "y") es `tmFrom` "x y"
     it "parses recursive functions" do
-      let t = RecFun (sv "x") (sv "f") (tmVar "x") es
-      t `tmFrom` "fun f (x) x"
+      let t = FixTm (sv "f") (FunTm (sv "x") Nothing (tmVar "x") es) es
+      t `tmFrom` "rec f -> (\\ x -> x)"
+      t `tmFrom` "rec f -> \\ x -> x"
     it "parses type application" do
       Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"
     it "throws an error for nonsense" do

@@ -108,9 +108,9 @@ indexTyVarsInTm = g 0 M.empty where
       t1' <- f t1
       t2' <- f t2
       pure $ AppTm t1' t2' s
-    RecFun xv fv t1 s -> do
+    FixTm fv t1 s -> do
       t1' <- g (i+1) idxMap t1
-      pure $ RecFun xv fv t1' s
+      pure $ FixTm fv t1' s
     Anno t1 ty s -> do
       t1' <- f t1
       ty' <- rawIndexTyVars i idxMap ty
@@ -309,14 +309,12 @@ ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
     Copy v s -> case M.lookup v ctx.termVars of
       Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> (s, Right v ):l
       Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> (s, Left x ):l
-      Just (_,RefTy (LtJoin _ _) _ _) ->
-        error "should have been caught before now"
       _ -> l
     RefTm v s -> if M.member v ctx.termVars then (s, Right v ):l else l
     AppTy t1 _ _ -> f t1 l
     Drop _ t1 _ -> f t1 l
     AppTm t1 t2 _ -> f t2 $ f t1 l
-    RecFun _ _ t1 _ -> f t1 l
+    FixTm _ t1 _ -> f t1 l
     Anno t1 _ _ -> f t1 l
     where f = g i
 
@@ -710,6 +708,7 @@ checkPoly :: Span -> TyVarBinding -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc ()
 checkPoly s b kind body mult lts bodyTy = mkClosureCheck s body mult lts do
   withKind kind $ check bodyTy body
 
+{-
 checkRecFun :: Span -> SVar -> SVar -> Tm -> Ty -> Ty -> Ty -> Tc ()
 checkRecFun s x funVar body xTy lts bodyTy = mkClosureCheck s body Many lts do
   addVar x.var x.span xTy
@@ -719,6 +718,19 @@ checkRecFun s x funVar body xTy lts bodyTy = mkClosureCheck s body Many lts do
         rTy = RefTy (TyVar (MkTyVar fLtName 0) funVar.span) fTy funVar.span
     addVar funVar.var funVar.span rTy
     check bodyTy body
+-}
+
+checkFixTm :: Span -> Mult -> SVar -> Tm -> Ty -> Tc ()
+checkFixTm s mult funVar body bodyTy = do
+  when (mult == Single) $ throwError $ CannotFixSingle s $ getSpan bodyTy
+  withKind LtKind do
+    -- fLt is essentially static. Even if the reference escapes, the lts
+    -- stuff will keep it from being used wrong.
+    let fLt = LtJoin [] funVar.span
+        refTy = RefTy fLt bodyTy funVar.span
+    addVar funVar.var funVar.span refTy
+    check bodyTy body
+    dropVar funVar.var funVar.span
 
 synth :: Tm -> Tc Ty
 synth tm = verifyCtxSubset (getSpan tm) $ case tm of
@@ -782,7 +794,7 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
       _ -> throwError $ TyIsNotFun t1Ty s
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
-  RecFun _ _ _ s -> throwError $ CannotSynthRecFun s
+  FixTm _ _ s -> throwError $ CannotSynthFixTm s
 
 check :: Ty -> Tm -> Tc ()
 check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
@@ -811,13 +823,16 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
           unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
         checkPoly s1 b2 k2 body m lts bodyTy
       _ -> throwError $ ExpectedUnivType ty s1
-  RecFun x funVar body s1 ->
+  FixTm funVar body s1 ->
     case ty of
       FunTy m xTy lts bodyTy s2 -> do
         checkBorrowList lts s1
-        when (m == Single) $ throwError $ RecFunIsNotSingle s1 s2
-        checkRecFun s1 x funVar body xTy lts bodyTy
-      _ -> throwError $ ExpectedFunType ty s1
+        checkFixTm s1 m funVar body ty
+      Univ m lts bind kind bodyTy s2 -> do
+        checkBorrowList lts s1
+        checkFixTm s1 m funVar body ty
+        -- checkRecFun s1 x funVar body xTy lts bodyTy
+      _ -> throwError $ ExpectedFixableType ty s1
   _ -> do
     ty' <- synth tm
     if ty == ty'

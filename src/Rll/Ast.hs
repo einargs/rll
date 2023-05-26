@@ -149,9 +149,10 @@ data Tm
   | AppTy Tm Ty Span
   | Drop SVar Tm Span
   | AppTm Tm Tm Span
-  -- | argument var, function var, body
-  -- Recursive functions cannot be synthesized.
-  | RecFun SVar SVar Tm Span
+  -- | function name var, body
+  --
+  -- Cannot be synthesized.
+  | FixTm SVar Tm Span
   | Anno Tm Ty Span
   deriving (Show, Eq)
 
@@ -169,6 +170,6 @@ instance Spans Tm where
     AppTy _ _ s -> s
     Drop _ _ s -> s
     AppTm _ _ s -> s
-    RecFun _ _ _ s -> s
+    FixTm _ _ s -> s
     Anno _ _ s -> s
 

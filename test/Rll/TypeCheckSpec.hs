@@ -245,18 +245,23 @@ spec = do
     it "can check simple recursive functions" do
       baseTest [txt|
          test : Unit -M[]> Unit
-         = fun f (x) drop f in x;
+         = rec f -> \ x -> x;
 
          test2 : Unit -M[]> Unit -M[]> Unit
-         = fun f1 (x) drop f1 in
+         = rec f1 -> \ x ->
          let Unit = x in
-         fun f2 (y) drop f2 in y;
+         rec f2 -> \ y -> y;
          |]
 
     it "can catch a recursive function being single use" do
-      baseFailTest (RecFunIsNotSingle es es) [txt|
+      baseFailTest (CannotFixSingle es es) [txt|
         test : Unit -S[]> Unit
-        = fun f1 (x) x;
+        = rec f -> \ x -> x;
+        |]
+    it "can catch a recursive polymorphic function being single use" do
+      baseFailTest (CannotFixSingle es es) [txt|
+        test : forall S [] l : Lifetime. &l Unit -S[]> Unit
+        = rec f -> ^ \ x -> drop x in Unit;
         |]
 
     it "can check complex multi-argument functions with polymorphism" do
@@ -307,20 +312,16 @@ spec = do
         enum Nat = Succ Nat | Zero;
 
         double : forall M [] l : Lifetime. &l Nat -M[]> Nat
-        = let wrap = (fun w (u)
-        let Unit = u in
-        let f = w Unit in
-        ^ l : Lifetime -> \ x -> case copy x of
+        = rec f -> ^ l : Lifetime ->
+        \ x -> case x of
         | Zero -> Zero
-        | Succ n -> Succ (Succ (&f [l] n)))
-          : Unit -M[]> forall M [] l : Lifetime. &l Nat -M[]> Nat
-        in wrap Unit;
+        | Succ n -> Succ (Succ (copy f [l] n));
 
         add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
-        = ^ l : Lifetime -> fun f (natRef) \nat ->
+        = rec f -> ^ l : Lifetime -> \natRef -> \nat ->
         case natRef of
-        | Succ n -> f n (Succ nat)
-        | Zero -> drop f in nat;
+        | Succ n -> copy f [l] n (Succ nat)
+        | Zero -> nat;
         |]
 
     it "can check usage of reference copy" do

@@ -115,7 +115,7 @@ data TyErr
   -- Type, span of AppTm
   | TyIsNotFun Ty Span
   -- | Cannot synthesize the type of a recursive function. Please use an annotation.
-  | CannotSynthRecFun Span
+  | CannotSynthFixTm Span
   -- | We expected a specific type and got a different one.
   | ExpectedType Ty Ty
   -- | Type binding mismatch.
@@ -124,10 +124,10 @@ data TyErr
   | TypeVarBindingMismatch TyVarBinding Span TyVarBinding Span
   -- | Mismatch of the kinds when checking a type variable.
   | TypeKindBindingMismatch Kind Span Kind Span
-  -- | Recursive function cannot be single use.
+  -- | Cannot create a recursive function from a single use function.
   --
   -- Span for recursive function, span for incorrect type
-  | RecFunIsNotSingle Span Span
+  | CannotFixSingle Span Span
   -- | Error for when the data type already exists.
   --
   -- Name of data type, span for second definition
@@ -146,6 +146,11 @@ data TyErr
   -- Type got, span of term.
   -- TODO: combine with TyIsNotFun
   | ExpectedFunType Ty Span
+  -- | We expected a function or universal quantification type as
+  -- the argument to a FixTm.
+  --
+  -- Type, span of fix term
+  | ExpectedFixableType Ty Span
   -- | We expected a forall type. Thrown when checking a Poly with
   -- a non-univ type.
   --
@@ -190,9 +195,10 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
   spanMsg s msg = block s (Just msg) (defaultSpanToPtrs s) Nothing
 
   errMsg = case err of
+    -- TODO: equip with spans for each context so I can nicely point at each context.
     CannotJoinCtxs ctxs s ->
       let f (v,bc,ty) = v.name <> ": " <> tshow ty
-          g ctx = T.intercalate ", " $ f <$> ctx
+          g ctx = "[" <> T.intercalate ", " (f <$> ctx) <> "]"
           msg = T.unlines $ g <$> diffCtxTerms ctxs
       in block s
         (Just "Cannot join contexts")
@@ -272,6 +278,17 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
         ]
         Nothing
 
+    ExpectedFixableType ty s ->
+      let tySpan = getSpan ty
+          funMsg = "fix site"
+          tyMsg = "Type should be a function or polymorphic type."
+      in E.Errata
+        (Just "Type must be polymorphic or a function to make recursive")
+        [ highlightBlock s (Just funMsg) (defaultSpanToPtrs s) Nothing
+        , defBlock tySpan (Just tyMsg) (defaultSpanToPtrs tySpan) Nothing
+        ]
+        Nothing
+
     ExpectedUnivType ty s ->
       let tySpan = getSpan ty
           polyMsg = "Polymorphic term"
@@ -283,7 +300,7 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
         ]
         Nothing
 
-    RecFunIsNotSingle tmSpan tySpan ->
+    CannotFixSingle tmSpan tySpan ->
       let polyMsg = "Polymorphic term"
           tyMsg = "Type should be a polymorphic type"
       in E.Errata
@@ -293,7 +310,7 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
         ]
         Nothing
 
-    CannotSynthRecFun s -> spanMsg s
+    CannotSynthFixTm s -> spanMsg s
       "Cannot synthesize the type of a recursive function."
 
     CannotRefOfRef ty s -> spanMsg s
