@@ -208,7 +208,8 @@ addModuleFun s name ty = do
   put $ ctx {moduleTerms=M.insert name ty ctx.moduleTerms}
 
 alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
-alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f) v
+alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f') v
+  where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 -- | Use this to construct the type of a reference type.
 borrowVar :: Var -> Span -> Tc Ty
@@ -655,8 +656,7 @@ mkClosureSynth s body m = do
   let lts = flip LtJoin s $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s startCtx endCtx
-  vars <- lifetimeVars lts
-  forM_ vars $ flip alterBorrowCount (+1)
+  incrementLts lts
   pure $ (lts, mult, out)
 
 synthFun :: Span -> SVar -> Ty -> Tm -> Tc Ty
@@ -680,7 +680,8 @@ verifyBorrows s startCtx endCtx lts body = do
   -- TODO: upgrade to list variables.
   unless (ltsSet == inferredLtSet) $ throwError $
     IncorrectBorrowedVars lts (ltSetToTypes inferredLtSet) s
-  forM_ vars $ flip alterBorrowCount (+1)
+  incrementLts lts
+  -- forM_ vars $ flip alterBorrowCount (+1)
   where
     inferredLtSet = ltsForClosure startCtx endCtx body
 
@@ -759,25 +760,19 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
     case t1Ty of
       Univ _ lts v k body _ -> do
         decrementLts lts
+        incRef body
         pure $ typeSub tyArg body
       RefTy l (Univ Many lts v k body _) _ -> do
         useRef t1Ty
+        incRef body
         pure $ typeSub tyArg body
       _ -> throwError $ TyIsNotUniv t1Ty s
   AppTm t1 t2 s -> do
     -- Roughly we synthesize t1 and use that to check t2.
     t1Ty <- synth t1
     case t1Ty of
-      FunTy Single aTy lts bTy _ -> do
-        checkBorrowList lts s
-        check aTy t2
-        useRef aTy
-        decrementLts lts
-        incRef bTy
-        pure bTy
-      -- TODO: original plan called for only being able to call multi-use functions
-      -- through references, but is that really a useful distinction?
-      FunTy Many aTy lts bTy _ -> do
+      -- We allow consumption of both single and multi-use functions.
+      FunTy _ aTy lts bTy _ -> do
         checkBorrowList lts s
         check aTy t2
         useRef aTy

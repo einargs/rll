@@ -548,7 +548,6 @@ spec = do
         a;
         |]
 
-    -- TODO it "properly maintains borrow counts when returning univ and function types."
     it "shifts type variable indices for term variable types" do
       -- Basically we're checking to make sure that if I have a type variable with index 0
       -- in a variable's type, and then introduce a type binder, that variable is shifted
@@ -567,6 +566,28 @@ spec = do
         let Unit = b in c;
         |]
 
+    it "properly maintains borrow counts when returning univ and function types" do
+      baseTest [txt|
+        other : Unit -M[]> forall S [] l1 : Lifetime.
+          forall S [] l2 : Lifetime.
+          &l1 Unit -S[]> &l2 Unit -S[l1]>
+          forall S [l1, l2] t : Type. t -S[l1, l2]> t
+        = \x -> ^ l1 : Lifetime -> ^l2 : Lifetime ->
+        \r1 -> \r2 -> ^ t:Type -> \y ->
+        let Unit = x in
+        drop r1 in drop r2 in y;
+
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let final = other Unit ['u1] ['u2] &u1 &u2 in
+        let Int = final [Int] Int in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+
 
 
     -- it "" do
@@ -576,8 +597,3 @@ spec = do
 
     -- TODO make sure I don't have any problems with type substitution
     -- capturing a free variable in lifetimes.
-
-    -- TODO check copy
-      -- baseTest [txt|
-      --   test : Unit = Unit
-      --   |]
