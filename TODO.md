@@ -1,18 +1,8 @@
-NEXT STEP: write tests for checking functions.
-
-- [ ] I also have to run a check to add the lifetimes in any variables consumed
-  by a closure.
-- [X] Change case statements to infer whether they're working on a reference or not.
-- [X] Write a pass that goes through and assigns de-brujin indices.
-- [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
-- [ ] Implement system F omega with type functions so I can have polymorphic data types.
-  - I finally worked out the difference between system f and f omega -- applying types at the type level.
-- [ ] check to make sure all top level functions are multi-use.
-- [ ] Allow me to ommit the empty lifetime brackets in functions.
-- [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
-- [ ] I do actually need the lifetime for the recursive function? No, I can make it static
-  and rely on the lts to do that for me.
-  - [ ] Go through and fix any code assuming that references can't have LtJoin as their lifetimes.
+# Current
+- [ ] Add kind checking to applying a type argument to poly/univ.
+- [ ] Code to take the inferred type for a case of or let struct expr, check that it's
+  fully applied, and then use that to substitute the correct types for each branch and such.
+  Something like `Ty -> Span -> Tc [Ty]`
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -33,14 +23,14 @@ These are eventual things to do for polishing.
 - [X] Label all the parser nodes for better error messages.
 - [ ] Avoid calculating difference between entrance and exit scopes twice for mult and consumed
   variables.
-- [ ] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
+- [X] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
 - [ ] Add test code to specifically check that the correct errors are triggered at the right spots.
 - [ ] Remove excess `try` in the parser. Probably take it out of branch and then manually
   add try where necessary.
 - [ ] Make sure variable names and such are strict text.
 - [ ] Adjust the parser so that lowerText and upperText parse any kind of text, they just throw
   a parse error for incorrect capitalization.
-- [ ] I'm going to need like a `SpanVar` type for e.g. function arguments where I want to be able
+- [X] I'm going to need like a `SpanVar` type for e.g. function arguments where I want to be able
   to point at it.
 - [ ] Maybe a way of indicating a span is not directly linked to source, but inferred from that source.
 - [ ] Probably create a dedicated type equality thing that ignores TyVarBinding etc so that equality
@@ -49,6 +39,16 @@ These are eventual things to do for polishing.
 - [ ] A map holding info about where variables are dropped so I can give nice error messages about stuff
   being dropped.
 - [ ] Rewrite some of my error messages to assume the specified type is correct not the term.
+- [ ] check to make sure all top level functions are multi-use.
+- [ ] Allow me to ommit the empty lifetime brackets in functions.
+- [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
+- [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
+- [ ] Decide whether having the struct name in the data type is redundant
+- [ ] Rewrite to use recursion schemes.
+- [ ] See if I can optimize type substitution by only shifting once I'm replacing with the
+  argument.
+- [ ] Test to make sure that a TypeIsNotStruct error on a reference to a type doesn't highlight
+  the entire type, just the inside of the reference type.
 
 # Feature Thoughts
 Thoughts about various future features.
@@ -68,3 +68,4 @@ Thoughts about various future features.
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.
   See the funDecl parser.
+- I finally worked out the difference between system f and f omega -- applying types at the type level.

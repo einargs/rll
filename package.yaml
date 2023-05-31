@@ -78,6 +78,7 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wincomplete-patterns
     dependencies:
     - rll
 
@@ -89,5 +90,6 @@ tests:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -Wincomplete-patterns
     dependencies:
     - rll

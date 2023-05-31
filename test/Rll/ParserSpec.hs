@@ -6,6 +6,7 @@ import qualified Data.Text as T
 import Data.Text (Text)
 import qualified Text.Megaparsec as M
 import Data.Either (isLeft)
+import System.Timeout (timeout)
 
 import QuoteTxt
 import Rll.Parser
@@ -31,8 +32,21 @@ parseShouldError p t = do
   let result = M.parse (p <* M.eof) "test.rll" t
   result `shouldSatisfy` isLeft
 
+-- | Just checks to make sure that there are no errors parsing the file.
+canParse :: Text -> Expectation
+canParse text = do
+  result <- timeout delay attempt
+  case result of
+    Nothing -> expectationFailure "Timed out"
+    Just _ -> pure ()
+  where
+    delay = 10^6 -- one minute
+    attempt = case M.parse fileDecls "test.rll" text of
+      Left err -> expectationFailure $ M.errorBundlePretty err
+      Right _ -> pure ()
+
 spec :: Spec
-spec = do
+spec = parallel do
   describe "tm" do
     let tmVar n = TmVar (Var n) es
     it "parses terms in parentheses" do
@@ -88,6 +102,7 @@ spec = do
     it "throws an error for nonsense" do
       -- TODO: seems to badly infinite loop and grow and run everything out of resources?
       parseShouldError tm "!@#@! "
+
   describe "ty" do
     let ltJoinXY = LtJoin [LtOf (Var "x") es, LtOf (Var "y") es] es
         unitTy = TyCon (Var "Unit") es
@@ -125,24 +140,55 @@ spec = do
       t `tyFrom` "forall S ['x,'y]a : Type. Unit // COMMENT"
     it "throws an error for nonsense" do
       parseShouldError ty "!@#@! "
+
   describe "decl" do
     let tyCon t = TyCon (Var t) es
         tyVar n = TyVar (MkTyVar n 0) es
         tmVar n = TmVar (Var n) es
+        tyKind v = TypeParam v TyKind
     it "parses function declarations" do
       let t = FunDecl "test" (tyCon "Bool") (tmVar "b") es
       t `declFrom` "test : Bool = b;"
     it "parses enum declarations" do
-      let t1 = EnumDecl "Either" [l, r] es
+      let t1 = EnumDecl "Either" [tyKind "a", tyKind "b"] [l, r] es
           l = EnumCon "Left" [tyVar "a"]
           r = EnumCon "Right" [tyVar "b", tyVar "c"]
-          t2 = EnumDecl "Bool" [EnumCon "False" [], EnumCon "True" []] es
-      t1 `declFrom` "enum Either = Left a | Right b c;"
+          t2 = EnumDecl "Bool" [] [EnumCon "False" [], EnumCon "True" []] es
+      t1 `declFrom` "enum Either (a:Type) (b:Type) = Left a | Right b c;"
       t2 `declFrom` "enum Bool = False | True;"
     it "parses struct declarations" do
-      let t = StructDecl "Pair" [tyVar "a", tyVar "b"] es
-      t `declFrom` "struct Pair { a b }"
+      let t1 = StructDecl "Pair" [tyKind "a", tyKind "b"] [tyVar "a", tyVar "b"] es
+          t2 = StructDecl "IS" [] [tyCon "Int", tyCon "Str"] es
+      t1 `declFrom` "struct Pair (a:Type) (b:Type) { a b }"
+      t2 `declFrom` "struct IS { Int Str }"
     it "throws an error for nonsense" do
       parseShouldError decl "!@#@! "
+
+  describe "file" do
+    it "should parse functions quickly" do
+      canParse [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let u3 = Unit in
+        let u4 = Unit in
+        let u5 = Unit in
+        let u6 = Unit in
+        let s1 = Str in
+        let s2 = Str in
+        let i1 = Int in
+        let s3 = Str in
+        let Unit = u1 in
+        let Unit = u5 in
+        let Unit = u6 in
+        let Str = s3 in
+        let Str = s2 in
+        let Unit = u2 in
+        let Unit = u3 in
+        let Unit = u4 in
+        let Int = i1 in
+        let Str = s1 in
+        Unit;
+        |]
 
 

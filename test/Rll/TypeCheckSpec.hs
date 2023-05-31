@@ -15,20 +15,18 @@ import Rll.Context
 processFile :: T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
 processFile text = mapM_ processDecl <$> M.parse RP.fileDecls "test.rll" text
 
-baseCtx :: Ctx
-baseCtx = case runTc emptyCtx fileTc of
-  Left err -> error $ show err
-  Right (_,ctx) -> ctx
-  where fileTc = case processFile file of
-          Left err -> error $ M.errorBundlePretty err
-          Right v -> v
-        file = [txt|
+stdFile :: T.Text
+stdFile = [txt|
 struct Unit {}
 struct Int {}
 struct Str {}
 struct Pair { Int Str }
 enum Sum = Left Int | Right Str;
 enum Bool = True | False;
+
+struct Tuple (a:Type) (b:Type) { a b }
+
+enum Either (a:Type) (b:Type) = InL a | InR b;
 
 consInt : Int -M[]> Unit
 = \x -> let Int = x in Unit;
@@ -45,6 +43,14 @@ consSum : Sum -M[]> Unit
 | Left i -> let Int = i in Unit
 | Right s -> let Str = s in Unit;
 |]
+
+baseCtx :: Ctx
+baseCtx = case runTc emptyCtx fileTc of
+  Left err -> error $ T.unpack $ prettyPrintError stdFile err
+  Right (_,ctx) -> ctx
+  where fileTc = case processFile stdFile of
+          Left err -> error $ M.errorBundlePretty err
+          Right v -> v
 
 buildChecker :: (Tm -> Ty -> Expectation) -> T.Text -> T.Text -> Expectation
 buildChecker cmp tmTxt tyTxt = do
@@ -99,12 +105,14 @@ tyCon v = TyCon (Var v) es
 refTy v ty = RefTy (LtOf (Var v) es) ty es
 
 spec :: Spec
-spec = do
+spec = parallel do
   -- describe "varsBorrowedIn" do
   --   it "can derive a list of borrowed variables" do
   --     let ctx = Ctx
   --     varsBorrowedIn
   describe "type checking" do
+    it "Standard context parses" do
+      rawTest stdFile
     it "can type check using pair" do
       baseTest [txt|
         val : Pair
@@ -381,7 +389,7 @@ spec = do
         |]
 
     it "can catch an unbound type variable" do
-      baseFailTest (UnknownTypeVar "a" es) [txt|
+      baseFailTest (UnknownTypeVar (MkTyVar "a" 0) es) [txt|
         test : &a Int -M[]> Int
         = \r-> drop r in Int;
         |]
@@ -586,6 +594,112 @@ spec = do
         let Unit = u2 in
         Unit;
         |]
+
+    it "can pass references as type arguments" do
+      baseTest [txt|
+        id : forall M [] t : Type. t -M[]> t
+        = ^ \v -> v;
+
+        test : Unit
+        = let u = Unit in
+        let ur = id [&'u Unit] &u in
+        drop ur in
+        u;
+        |]
+
+    it "can take a type operator application as a type argument" do
+      baseTest [txt|
+        struct Holder (a:Type) { a }
+        id : forall M [] t : Type. t -M[]> t
+        = ^ \v -> v;
+
+        test : Unit
+        = let u = Unit in
+        let h = id [Holder Unit] (Holder [Unit] u) in
+        let Holder u = h in
+        u;
+        |]
+
+    it "can check constructing and destructuring a generic struct" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        test : Unit
+        = let tup = Tuple [Str] [Int] Str Int in
+        let Tuple s i = &tup in
+        drop s in drop i in
+        let Tuple s i = tup in
+        let Str = s in let Int = i in
+        Unit;
+        |]
+
+    it "can check nesting a generic struct" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        test : Unit
+        = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
+        let Tuple i stup = tup in
+        let Int = i in let Tuple s1 s2 = stup in
+        let Str = s1 in let Str = s2 in
+        Unit;
+        |]
+
+    it "can check borrowing a generic struct" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        test : Unit
+        = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
+        let Tuple ir stupr = &tup in
+        drop ir in drop stupr in
+        let Tuple i stup = tup in
+        let Int = i in let Tuple s1 s2 = stup in
+        let Str = s1 in let Str = s2 in
+        Unit;
+        |]
+
+    it "can check complex usage of several generic structs" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        test : Unit
+        = let tup = Tuple [Str] [Int] Str Int in
+        let Tuple s i = &tup in
+        drop s in drop i in
+        let tup2 = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
+        let Tuple s i = tup in
+        let Str = s in let Int = i in
+        let Tuple i stup = &tup2 in
+        drop i in
+        let Tuple s1 s2 = copy stup in
+        drop stup in
+        let Str = copyStr ['tup2] s1 in
+        drop s1 in drop s2 in
+        let Tuple i stup = tup2 in
+        let Int = i in let Tuple s1 s2 = stup in
+        let Str = s1 in let Str = s2 in
+        Unit;
+        |]
+
+    -- it "can take a higher kind as a type argument" do
+    --   baseTest [txt|
+    --     test : Unit = Unit
+    --     |]
+
+
 
 
 

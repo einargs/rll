@@ -65,10 +65,10 @@ diffCtxTerms full = f <$> diffs where
 
 
 data DataType
-  = EnumType (M.HashMap Text [Ty]) Span
-  | StructType Text [Ty] Span
+  = EnumType [TypeParam] (M.HashMap Text [Ty]) Span
+  | StructType Text [TypeParam] [Ty] Span
   deriving (Eq, Show)
 
 instance Spans DataType where
-  getSpan (EnumType _ s) = s
-  getSpan (StructType _ _ s) = s
+  getSpan (EnumType _ _ s) = s
+  getSpan (StructType _ _ _ s) = s

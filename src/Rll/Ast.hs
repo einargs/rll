@@ -1,4 +1,4 @@
-{-# LANGUAGE DuplicateRecordFields, PatternSynonyms, BangPatterns #-}
+{-# LANGUAGE OverloadedRecordDot, DuplicateRecordFields, PatternSynonyms, BangPatterns #-}
 module Rll.Ast where
 
 import Data.Text (Text)
@@ -44,10 +44,13 @@ instance Ord TyVarBinding where
 data EnumCon = EnumCon Text [Ty]
   deriving (Show, Eq)
 
+data TypeParam = TypeParam { name::Text, kind:: Kind }
+  deriving (Show, Eq)
+
 data Decl
   = FunDecl Text Ty Tm Span
-  | EnumDecl Text [EnumCon] Span
-  | StructDecl Text [Ty] Span
+  | EnumDecl Text [TypeParam] [EnumCon] Span
+  | StructDecl Text [TypeParam] [Ty] Span
   deriving (Show, Eq)
 
 data Span = Span
@@ -79,6 +82,7 @@ instance Ord Span where
 data Kind
   = TyKind
   | LtKind
+  | TyOpKind Kind Kind
   deriving (Eq, Show)
 
 data Mult
@@ -92,19 +96,21 @@ class Spans a where
 instance Spans SVar where
   getSpan sv = sv.span
 
--- TODO Write Static as a pattern for LtJoin []
 data Ty
   = TyVar TyVar Span
-  -- can probably be replaced with `LtJoin []`
-  --  | Static
   | TyCon Var Span
   | LtOf Var Span
   -- | function type; Multiplicity, Input, Lifetime, Output
   | FunTy Mult Ty Ty Ty Span
+  -- | Union of lifetimes.
+  --
+  -- Empty list means static lifetime.
   | LtJoin [Ty] Span
   | RefTy Ty Ty Span
   -- | Multiplicity, lifetimes, type var name, type var kind, body
   | Univ Mult Ty TyVarBinding Kind Ty Span
+  -- | Type application to type operators
+  | TyApp Ty Ty Span
   deriving (Eq)
 
 instance Show Ty where
@@ -122,6 +128,7 @@ instance Show Ty where
     where m' = case m of
             Many -> "M"
             Single -> "S"
+  show (TyApp t1 t2 _) = show t1 <> " " <> show t2
 
 instance Spans Ty where
   getSpan ty = case ty of

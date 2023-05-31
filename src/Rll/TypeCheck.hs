@@ -5,7 +5,7 @@ import Rll.Ast
 import Rll.TypeError
 import Rll.Context
 
-import Control.Monad (unless, when, forM_, void)
+import Control.Monad (unless, when, forM_, void, forM)
 import Data.Text (Text, pack, unpack)
 import qualified Data.IntMap as IM
 import qualified Data.IntSet as IS
@@ -41,9 +41,9 @@ evalTc ctx = fmap fst . runTc ctx
 -- Then we just take the difference to get the de-brujin index.
 rawIndexTyVars :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
 rawIndexTyVars i idxMap typ = case typ of
-  TyVar (MkTyVar name _) s -> case M.lookup name idxMap of
+  TyVar tv@(MkTyVar name _) s -> case M.lookup name idxMap of
     Just i' -> pure $ TyVar (MkTyVar name $ i-i') s
-    Nothing -> throwError $ UnknownTypeVar name s
+    Nothing -> throwError $ UnknownTypeVar tv s
   FunTy m aTy lts bTy s -> do
     aTy' <- f' aTy
     lts' <- f' lts
@@ -61,6 +61,10 @@ rawIndexTyVars i idxMap typ = case typ of
     let idxMap' = M.insert name (i+1) idxMap
     bodyTy' <- rawIndexTyVars (i+1) idxMap' bodyTy
     pure $ Univ m lts' bind k bodyTy' s
+  TyApp aTy bTy s -> do
+    aTy' <- f' aTy
+    bTy' <- f' bTy
+    pure $ TyApp aTy' bTy' s
   _ -> pure typ
   where f' = rawIndexTyVars i idxMap
 
@@ -156,7 +160,30 @@ lookupKind v@(MkTyVar name i) s = do
   l <- gets (.localTypeVars)
   case atMay l i of
     Just k -> pure k
-    Nothing -> throwError $ UnknownTypeVar name s
+    Nothing -> throwError $ UnknownTypeVar v s
+
+kindOf :: Ty -> Tc Kind
+kindOf ty = case ty of
+  TyVar tv s -> lookupKind tv s
+  TyCon name s -> lookupDataType name s >>= \case
+    StructType _ tyParams _ _ -> pure $ kindFrom tyParams
+    EnumType tyParams _ _ -> pure $ kindFrom tyParams
+  LtOf _ _ -> pure LtKind
+  FunTy _ _ _ _ _ -> pure TyKind
+  LtJoin _ _ -> pure LtKind
+  RefTy _ _ _ -> pure TyKind
+  Univ _ _ _ _ _ _ -> pure TyKind
+  TyApp ty1 ty2 s -> do
+    k1 <- kindOf ty1
+    case k1 of
+      TyOpKind ak bk -> do
+        k2 <- kindOf ty2
+        unless (ak == k2) $ throwError $ ExpectedKind ak k2 $ getSpan ty2
+        pure bk
+      _ -> throwError $ IsNotTyOp k1 $ getSpan ty1
+  where
+    kindFrom :: [TypeParam] -> Kind
+    kindFrom tyParams = foldr TyOpKind TyKind $ (.kind) <$> tyParams
 
 lookupDataType :: Var -> Span -> Tc DataType
 lookupDataType v s = do
@@ -174,30 +201,38 @@ lookupDataCon v s = do
 
 addDataType :: Var -> DataType -> Tc ()
 addDataType tyName dt = do
-  let s = getSpan dt
   ctx <- get
   case M.lookup tyName ctx.dataTypes of
     Just _ -> throwError $ DataTypeAlreadyExists tyName s
     Nothing -> pure ()
-  let f :: (Text, [Ty]) -> (Var, Ty)
-      f (name, args) = (Var name, buildTy (TyCon tyName s) $ reverse args)
-      buildTy :: Ty -> [Ty] -> Ty
-      buildTy ty [] = ty
-      buildTy result [input] = FunTy Many input (LtJoin [] s) result s
-      buildTy result (input:args) = buildTy fTy args
-        where fTy = FunTy Single input (LtJoin [] s) result s
-      terms = case dt of
-        EnumType caseM _ -> f <$> M.toList caseM
-        StructType v args _ -> [f (v,args)]
-  forM_ terms \(v,ty) -> case M.lookup v ctx.moduleTerms of
+  let terms = case dt of
+        EnumType tyArgs caseM _ -> f tyArgs <$> M.toList caseM
+        StructType v tyArgs args _ -> [f tyArgs (v,args)]
+  terms' <- forM terms \(v,ty) -> (v,) <$> indexTyVars ty
+  forM_ terms' \(v,ty) -> case M.lookup v ctx.moduleTerms of
     Just _ -> throwError $ DefAlreadyExists v s
     Nothing -> pure ()
   put $ ctx
-    { moduleTerms = foldl' (flip $ uncurry M.insert) ctx.moduleTerms terms
+    { moduleTerms = foldl' (flip $ uncurry M.insert) ctx.moduleTerms terms'
     , dataTypes = M.insert tyName dt ctx.dataTypes
     }
+  where
+    s = getSpan dt
+    f :: [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
+    f tyArgs (name, args) = (Var name, result) where
+      finalTy = foldl' g (TyCon tyName s) $ zip tyArgs [0..] where
+        g base (TypeParam{name},i) = TyApp base (TyVar (MkTyVar name i) s) s
+      result = buildArgs tyArgs $ buildTy finalTy $ reverse args
+    buildArgs :: [TypeParam] -> Ty -> Ty
+    buildArgs tyArgs body = foldr f body tyArgs where
+      f (TypeParam{name, kind}) body = Univ Many (LtJoin [] s) (TyVarBinding name) kind body s
+    buildTy :: Ty -> [Ty] -> Ty
+    buildTy ty [] = ty
+    buildTy result [input] = FunTy Many input (LtJoin [] s) result s
+    buildTy result (input:args) = buildTy fTy args
+      where fTy = FunTy Single input (LtJoin [] s) result s
 
--- TODO: abstract out the "insert if it doesn't already exist" pattern.
+-- NOTE: abstract out the "insert if it doesn't already exist" pattern.
 
 addModuleFun :: Span -> Var -> Ty -> Tc ()
 addModuleFun s name ty = do
@@ -208,20 +243,18 @@ addModuleFun s name ty = do
   put $ ctx {moduleTerms=M.insert name ty ctx.moduleTerms}
 
 alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
-alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f') v
-  where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
+alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f) v
+  -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 -- | Use this to construct the type of a reference type.
 borrowVar :: Var -> Span -> Tc Ty
 borrowVar v s = do
-  -- TODO: I think this is only used like once, so maybe just replace
-  -- with doing it at call site. Better span manip then too.
   t <- lookupVar v s
   case t of
     RefTy _ _ _ -> throwError $ CannotRefOfRef t s
     _ -> pure ()
   alterBorrowCount v (+1)
-  -- TODO I'm pretty sure using this span makes sense, but check.
+  -- NOTE I'm pretty sure using this span makes sense, but check.
   pure $ RefTy (LtOf v s) t s
 
 addVar :: Var -> Span -> Ty -> Tc ()
@@ -267,10 +300,9 @@ lifetimeSet (LtJoin ls s) = S.unions <$> traverse lifetimeSet ls
 lifetimeSet ty@(TyVar x s) = do
   k <- lookupKind x s
   case k of
-    -- TODO: make sure there's no problem with ignoring variables.
     LtKind -> pure $ S.singleton $ (s, Left x)
-    TyKind -> throwError $ ExpectedKind LtKind ty TyKind
-lifetimeSet ty = throwError $ ExpectedKind LtKind ty TyKind
+    TyKind -> throwError $ ExpectedKind LtKind TyKind s
+lifetimeSet ty = throwError $ ExpectedKind LtKind TyKind $ getSpan ty
 
 -- | Get a set of all lifetimes mentioned in a type relative to the context.
 --
@@ -453,25 +485,25 @@ verifyCtxSubset s m = do
     in throwError $ VarsEscapingScope vars s
   pure v
 
-data TyOp a where
-  Check :: TyOp ()
-  Synth :: TyOp Ty
+data TcMethod a where
+  Check :: TcMethod ()
+  Synth :: TcMethod Ty
 
-class Eq a => TyOpResult a where
-  getTyOp :: TyOp a
+class Eq a => TcMethodResult a where
+  getTcMethod :: TcMethod a
 
-instance TyOpResult Ty where
-  getTyOp = Synth
+instance TcMethodResult Ty where
+  getTcMethod = Synth
 
-instance TyOpResult () where
-  getTyOp = Check
+instance TcMethodResult () where
+  getTcMethod = Check
 
 -- | Join type checking actions on multiple branches of a case statement.
 --
 -- We parameterize over equality for switching between synthesis and checking.
 --
 -- The span is the span of the overall case statement.
-joinBranches :: forall a. TyOpResult a => Span -> [Tc a] -> Tc a
+joinBranches :: forall a. TcMethodResult a => Span -> [Tc a] -> Tc a
 joinBranches s [] = throwError $ NoCaseBranches s
 joinBranches s [b] = b
 joinBranches s (b:bs) = do
@@ -485,7 +517,7 @@ joinBranches s (b:bs) = do
         pure $ (bTy, ctx')
   (tys,ctxs) <- unzip <$> traverse f bs
   unless (all (localEq ctx1) ctxs) $ throwError $ CannotJoinCtxs (ctx1:ctxs) s
-  () <- case getTyOp @a of
+  () <- case getTcMethod @a of
     Check -> pure ()
     Synth -> unless (all (ty==) tys) $ throwError $ CannotJoinTypes (ty:tys) s
   pure ty
@@ -507,22 +539,23 @@ rawTypeShift i c ty = case ty of
 typeShift :: Ty -> Ty
 typeShift = rawTypeShift 1 0
 
--- TODO rewrite a bunch of this using recursion schemes.
+rawTypeSub :: Int -> Ty -> Ty -> Ty
+rawTypeSub xi arg target = case target of
+  TyVar v@(MkTyVar _ vi) s -> if vi == xi then arg else TyVar v s
+  FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
+  LtJoin ts s -> LtJoin (f <$> ts) s
+  RefTy a b s -> RefTy (f a) (f b) s
+  Univ m lts v k body s -> Univ m (f lts) v k (rawTypeSub (xi+1) (rawTypeShift 1 0 arg) body) s
+  TyApp a b s -> TyApp (f a) (f b) s
+  TyCon _ _ -> target
+  LtOf _ _ -> target
+  where f = rawTypeSub xi arg
+
 -- | Do type substitution on the body of a Univ type.
+--
+-- Argument, body
 typeSub :: Ty -> Ty -> Ty
-typeSub = sub 0
-  where
-    sub :: Int -> Ty -> Ty -> Ty
-    sub xi arg target = case target of
-      -- TODO check if I can optimize by only shifting when I replace with the arg and adjusting
-      -- the counters.
-      TyVar v@(MkTyVar _ vi) s -> if vi == xi then arg else TyVar v s
-      FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
-      LtJoin ts s -> LtJoin (f <$> ts) s
-      RefTy a b s -> RefTy (f a) (f b) s
-      Univ m lts v k body s -> Univ m (f lts) v k (sub (xi+1) (rawTypeShift 1 0 arg) body) s
-      _ -> target
-      where f = sub xi arg
+typeSub = rawTypeSub 0
 
 -- | Borrow part of a data structure.
 --
@@ -536,28 +569,75 @@ addPartialBorrowVar v s lt bTy = do
     RefTy (LtOf v' _) _ _ -> alterBorrowCount v' (+1)
     RefTy (TyVar _ _) _ _ -> pure ()
     RefTy lt@(LtJoin _ _) _ _ -> throwError $ RefLtIsComposite lt s
-    RefTy lt _ _ -> throwError $ ExpectedKind LtKind lt TyKind
+    RefTy lt _ _ -> throwError $ ExpectedKind LtKind TyKind $ getSpan lt
     _ -> error "toRef should ensure type is always a RefTy"
 
-caseClause :: forall a. TyOpResult a => Span -> Tm -> [CaseBranch] -> (Tm -> Tc a) -> Tc a
+-- | Substitute for the type parameter variables inside the fields of a
+-- data type.
+applyTypeParams :: [Ty] -> [TypeParam] -> [Ty] -> [Ty]
+applyTypeParams args params members = go (length args - 1) args params members where
+  go i [] [] members = members
+  go i (a:as) (p:ps) members = go (i-1) as ps $
+    rawTypeSub i a <$> members
+  go i _ _ _ = error "Should be caught by kind check"
+
+-- | Pull apart a fully applied type constructor.
+--
+-- Takes an error builder function and the type. Returns the type con name,
+-- the type con type, and the list of arguments to it.
+getTyConArgs :: (Ty -> Tc (Var, Ty, [Ty])) -> Ty -> Tc (Var, Ty, [Ty])
+getTyConArgs mkErr ty = do
+  tyKind <- kindOf ty
+  unless (tyKind == TyKind) $ throwError $ ExpectedKind TyKind tyKind $ getSpan ty
+  getArgs ty
+  where
+    getArgs t@(TyCon name s) = pure (name, t, [])
+    getArgs (TyApp ty1 ty2 _) = do
+      (name, t, args) <- getArgs ty1
+      pure $ (name, t, ty2:args)
+    getArgs t = mkErr t
+
+caseClause :: forall a. TcMethodResult a => Span -> Tm -> [CaseBranch] -> (Tm -> Tc a) -> Tc a
 caseClause caseSpan t1 branches method = do
   t1Ty <- synth t1
   case t1Ty of
-    TyCon tyName conSpan -> do
-      conMap <- ensureEnum t1Ty tyName conSpan
-      let f sv ty = addVar sv.var sv.span ty
-      joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
-    RefTy lt (TyCon tyName conSpan) _ -> do
+    RefTy lt enumTy _ -> do
       useRef t1Ty
-      conMap <- ensureEnum t1Ty tyName conSpan
+      (tyName,conMap) <- ensureEnum enumTy
       let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
       joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
-    _ -> throwError $ TypeIsNotEnum t1Ty $ getSpan t1
+    _ -> do
+      (tyName,conMap) <- ensureEnum t1Ty
+      let f sv ty = addVar sv.var sv.span ty
+      joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
   where
+    ensureEnum :: Ty -> Tc (Var, M.HashMap Text [Ty])
+    ensureEnum enumTy = do
+      (tyName, conMap) <- getEnumCaseMap enumTy
+      let hasCon t (CaseBranch v _ _) = t == v.var.name
+          count t = (t, filter (hasCon t) branches)
+          occurances = count <$> M.keys conMap
+          noBranches (_, brs) = 0 == length brs
+          multBranches (_, brs) = 1 < length brs
+      case find noBranches occurances of
+        Just (name,_) -> throwError $ NoBranchForCase name caseSpan
+        Nothing -> pure ()
+      case find multBranches occurances of
+        Just (name,_) -> throwError $ MultBranchesForCase name caseSpan
+        Nothing -> pure ()
+      pure (tyName, conMap)
+    getEnumCaseMap :: Ty -> Tc (Var, M.HashMap Text [Ty])
+    getEnumCaseMap enumTy = do
+      let err t = throwError $ TypeIsNotEnum t $ getSpan t1
+      (tyName, conTy, args) <- getTyConArgs err enumTy
+      dt <- lookupDataType tyName $ getSpan conTy
+      case dt of
+        StructType _ _ _ _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
+        EnumType tyParams conMap _ -> do
+          pure $ (tyName, M.map (applyTypeParams args tyParams) conMap)
     handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> Tc a
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
       case M.lookup conVar.var.name conMap of
-        -- TODO: add spans to CaseBranch so I can pass that along instead of the case span.
         Nothing -> throwError $ UnknownEnumCase tyName conVar
         Just varTys -> do
           unless (length varTys == length vars) $ throwError
@@ -565,52 +645,43 @@ caseClause caseSpan t1 branches method = do
           let members = zip vars varTys
           forM_ members $ uncurry addMember
           method body
-    ensureEnum :: Ty -> Var -> Span -> Tc (M.HashMap Text [Ty])
-    ensureEnum t1Ty v conSpan = do
-      dt <- lookupDataType v conSpan
-      case dt of
-        StructType _ _ _ -> throwError $ TypeIsNotEnum t1Ty (getSpan t1)
-        EnumType conMap _ -> do
-          let hasCon t (CaseBranch v _ _) = t == v.var.name
-              count t = (t, filter (hasCon t) branches)
-              occurances = count <$> M.keys conMap
-              noBranches (_, brs) = 0 == length brs
-              multBranches (_, brs) = 1 < length brs
-          case find noBranches occurances of
-            Just (name,_) -> throwError $ NoBranchForCase name caseSpan
-            Nothing -> pure ()
-          case find multBranches occurances of
-            Just (name,_) -> throwError $ MultBranchesForCase name caseSpan
-            Nothing -> pure ()
-          pure conMap
+
+-- | Take a type that should be for a fully applied struct and get the types
+-- of the members with all type arguments applied.
+--
+-- Returns the constructor name, the struct type name, and fully applied member
+-- types.
+getStructMembers :: Ty -> Span -> Tc (Text, Var, [Ty])
+getStructMembers ty termSpan = do
+  (name, conTy, args) <- getTyConArgs (\t -> throwError $ TypeIsNotStruct t termSpan) ty
+  dt <- lookupDataType name $ getSpan conTy
+  case dt of
+    EnumType _ _ _ -> throwError $ TypeIsNotStruct conTy termSpan
+    StructType structCon' tyParams memberTys _ -> do
+      pure $ (structCon', name, applyTypeParams args tyParams memberTys)
 
 letStructClause :: forall a. Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
 letStructClause letSpan structCon memberVars t1 body method = do
   t1Ty <- synth t1
   case t1Ty of
-    TyCon tyName tySpan -> do
-      let f svar ty = addVar svar.var svar.span ty
-      handle f t1Ty tyName tySpan
-    RefTy lt (TyCon tyName tySpan) _ -> do
+    RefTy lt structTy _ -> do
       useRef t1Ty
       let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
-      handle f t1Ty tyName tySpan
-    _ -> throwError $ TypeIsNotStruct t1Ty $ getSpan t1
+      handle f structTy
+    _ -> do
+      let f svar ty = addVar svar.var svar.span ty
+      handle f t1Ty
   where
-    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Var -> Span -> Tc a
-    handle addMember t1Ty tyName tySpan = do
-      -- TODO In the future I might remove the struct name since it's redundant.
-      dt <- lookupDataType tyName tySpan
-      case dt of
-        EnumType _ _ -> throwError $ TypeIsNotStruct t1Ty $ getSpan t1
-        StructType structCon' memberTys _ -> do
-          unless (structCon.var.name == structCon') $ throwError $
-            WrongConstructor structCon.var structCon' tyName structCon.span
-          unless (length memberTys == length memberVars) $ throwError $
-            BadLetStructVars memberVars memberTys
-          let members = zip memberVars memberTys
-          forM_ members $ uncurry addMember
-          method body
+    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Tc a
+    handle addMember t1Ty = do
+      (structCon', tyName, memberTys) <- getStructMembers t1Ty $ getSpan t1
+      unless (structCon.var.name == structCon') $ throwError $
+        WrongConstructor structCon.var structCon' tyName structCon.span
+      unless (length memberTys == length memberVars) $
+        throwError $ BadLetStructVars memberVars memberTys
+      let members = zip memberVars memberTys
+      forM_ members $ uncurry addMember
+      method body
 
 letClause :: Span -> Var -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
 letClause s x t1 t2 f = do
@@ -677,7 +748,6 @@ verifyBorrows :: Span -> Ctx -> Ctx -> Ty -> Tm -> Tc ()
 verifyBorrows s startCtx endCtx lts body = do
   ltsSet <- lifetimeSet lts
   let vars = ltSetToVars inferredLtSet
-  -- TODO: upgrade to list variables.
   unless (ltsSet == inferredLtSet) $ throwError $
     IncorrectBorrowedVars lts (ltSetToTypes inferredLtSet) s
   incrementLts lts
@@ -741,14 +811,14 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 synth
   TmCon v s -> lookupDataCon v s
   Anno t ty _ -> check ty t >> pure ty
-  TmVar v s -> useVar v s
+  TmVar v s -> T.trace ("using " <> show v) $ useVar v s
   Copy v s -> do
     vTy <- lookupVar v s
     case vTy of
       RefTy (LtOf v' _ ) _ _ -> borrowVar v' s
       RefTy _ _ _ -> pure vTy
       _ -> throwError $ CannotCopyNonRef vTy s
-  RefTm v s -> borrowVar v s
+  RefTm v s -> T.trace ("borrowing " <> show v) $ borrowVar v s
   Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 synth
   Case t1 branches s -> caseClause s t1 branches synth
   FunTm v (Just vTy) body s -> synthFun s v vTy body
@@ -759,6 +829,8 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
     t1Ty <- synth t1
     case t1Ty of
       Univ _ lts v k body _ -> do
+        k' <- kindOf tyArg
+        unless (k == k') $ throwError $ ExpectedKind k k' $ getSpan tyArg
         decrementLts lts
         incRef body
         pure $ typeSub tyArg body
@@ -786,7 +858,7 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
         useRef t1Ty
         incRef bTy
         pure bTy
-      _ -> throwError $ TyIsNotFun t1Ty s
+      _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
   FixTm _ _ s -> throwError $ CannotSynthFixTm s
@@ -813,7 +885,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
       Univ m lts b2 k2 bodyTy s2 -> do
         checkBorrowList lts s1
         forM_ mbBind \(b1,k1) -> do
-          -- TODO I don't know if this should check text name.
+          -- NOTE I don't know if this should check text name.
           unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
           unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
         checkPoly s1 b2 k2 body m lts bodyTy
@@ -826,7 +898,6 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
       Univ m lts bind kind bodyTy s2 -> do
         checkBorrowList lts s1
         checkFixTm s1 m funVar body ty
-        -- checkRecFun s1 x funVar body xTy lts bodyTy
       _ -> throwError $ ExpectedFixableType ty s1
   _ -> do
     ty' <- synth tm
@@ -842,10 +913,15 @@ processDecl decl = case decl of
     body' <- indexTyVarsInTm body
     check ty' body'
     put ctx
-    -- TODO: add check to make sure they're all multi-use
     addModuleFun s (Var name) ty'
-  StructDecl name args s -> do
-    addDataType (Var name) $ StructType name args s
-  EnumDecl tyName enumCons s -> do
-    let caseM = M.fromList $ (\(EnumCon x y) -> (x,y)) <$> enumCons
-    addDataType (Var tyName) $ EnumType caseM s
+  StructDecl name tyParams args s -> do
+    indexedArgs <- indexArgs tyParams args
+    addDataType (Var name) $ StructType name tyParams indexedArgs s
+  EnumDecl tyName tyParams enumCons s -> do
+    enumCons' <- forM enumCons \(EnumCon x y) -> (x,) <$> indexArgs tyParams y
+    let caseM = M.fromList enumCons'
+    addDataType (Var tyName) $ EnumType tyParams caseM s
+  where
+    indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
+    indexArgs tyParams tys = traverse f tys where
+      f = rawIndexTyVars (length tyParams - 1) $ M.fromList $ zip ((.name) <$> reverse tyParams) [0..]

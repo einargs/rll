@@ -18,7 +18,7 @@ data TyErr
   -- | This is an error we didn't think was possible.
   = CompilerLogicError Text (Maybe Span)
   -- | The type variable was not bound.
-  | UnknownTypeVar Text Span
+  | UnknownTypeVar TyVar Span
   -- | The term variable has either been dropped or never introduced.
   | UnknownTermVar Var Span
   -- | We know the term var was used/dropped.
@@ -32,9 +32,9 @@ data TyErr
   -- The new variable, it's span, and the span of the existing one
   | VarAlreadyInScope Var Span Span
   -- | We expected the type to have a different kind.
-  -- Expected kind, Type, type's kind
+  -- Expected kind, type's kind, type loc
   -- TODO may eventually need a span for specific site indication?
-  | ExpectedKind Kind Ty Kind
+  | ExpectedKind Kind Kind Span
   -- | Cannot drop a variable that is still borrowed.
   | CannotDropBorrowedVar Var [Var] Span
   -- | This type cannot be dropped.
@@ -85,7 +85,7 @@ data TyErr
   -- | The constructor used in let struct did not match the struct type.
   --
   -- The incorrect constructor, the correct constructor, the struct type,
-  -- the span of the let struct expression
+  -- the span of the incorrect constructor in the let struct
   | WrongConstructor Var Text Var Span
   -- | The number of variables in let struct did not match the struct definition.
   | BadLetStructVars [SVar] [Ty]
@@ -160,6 +160,10 @@ data TyErr
   --
   -- Type of thing being ref'd, span of term being ref'd
   | CannotRefOfRef Ty Span
+  -- | Cannot apply a type to a non-type operator.
+  --
+  -- actual kind, location of type with that kind
+  | IsNotTyOp Kind Span
   deriving (Eq, Show)
 
 tshow :: Show a => a -> Text
@@ -326,7 +330,7 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       "expected a struct here, instead got type " <> tshow ty
 
     TyIsNotFun ty s -> spanMsg s $
-      "Can only apply term arguments to functions"
+      "Term is not a function. Type: " <> tshow ty
 
     CompilerLogicError msg mbSpan ->
       let blocks = case mbSpan of
@@ -334,7 +338,14 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
             Nothing -> []
       in E.Errata (Just msg) blocks Nothing
 
-    UnknownTypeVar name s -> spanMsg s "Unknown type variable"
+    -- TODO: fix up this message
+    BadLetStructVars vars tys -> spanMsg (getSpan $ head vars) $
+      T.concat ["There was a problem with the variables in this let struct.\n"
+                , "Vars: ", tshow vars, "\nExpected Types: ", tshow tys]
+
+    UnknownDataType name s -> spanMsg s $ "Unknown data type: " <> tshow name
+
+    UnknownTypeVar name s -> spanMsg s $ "Unknown type variable " <> tshow name
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]
