@@ -645,10 +645,85 @@ spec = parallel do
         = higher [Hold] (Hold [Unit]);
         |]
 
-    -- it "can check complex usage of a generic enum" do
-    --   baseTest [txt|
-    --     test : Unit = Unit
-    --     |]
+
+    it "can check complex usage of a generic enum" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        copyInt :
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        consEnum : Either Str (Either Int Str) -M[]> Unit
+        = \e1 -> case e1 of
+        | InL s -> let Str = s in Unit
+        | InR e2 -> case e2 of
+          | InL i -> consInt i
+          | InR s -> consStr s;
+
+        test : Unit
+        = let e1 = InL [Int] [Str] Int in
+        let e2 = InR [Str] [Either Int Str] (InL [Int] [Str] Int) in
+        let Unit = case &e1 of
+          | InL i -> consInt (copyInt ['e1] i)
+          | InR s1 -> let Str = copyStr ['e1] (copy s1) in drop s1 in Unit
+        in case e1 of
+        | InR s -> let Str = s in
+          let Str = case &e2 of
+            | InL s2 -> copyStr ['e2] s2
+            | InR e3r -> case e3r of
+              | InR s3 -> copyStr ['e2] s3
+              | InL i -> let Int = copyInt ['e2] i in Str
+          in consEnum e2
+        | InL i -> let Unit = consEnum e2 in consInt i;
+        |]
+
+    it "can catch a borrow error in complex usage of a generic enum" do
+      baseFailTest (CannotUseBorrowedVar (Var "e1") [Var "s1"] es) [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        copyInt :
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        consEnum2 : Either Str (Either Int Str) -M[]> Unit
+        = \e1 -> case e1 of
+        | InL s -> let Str = s in Unit
+        | InR e2 -> case e2 of
+          | InL i -> consInt i
+          | InR s -> consStr s;
+
+        consEnum1 : Either Int Str -M[]> Unit
+        = \e1 -> case e1 of
+        | InL i -> consInt i
+        | InR s -> consStr s;
+
+        test : Unit
+        = let e1 = InL [Int] [Str] Int in
+        let e2 = InR [Str] [Either Int Str] (InL [Int] [Str] Int) in
+        case &e1 of
+        | InL i -> let Unit = consEnum2 e2 in
+          let Int = (copyInt ['e1] i) in
+          consEnum1 e1
+        | InR s1 -> let Str = copyStr ['e1] (copy s1) in
+        case e1 of
+        | InR s -> let Str = s in
+          let Str = case &e2 of
+            | InL s2 -> copyStr ['e2] s2
+            | InR e3r -> case e3r of
+              | InR s3 -> copyStr ['e2] s3
+              | InL i -> let Int = copyInt ['e2] i in Str
+          in consEnum2 e2
+        | InL i -> let Unit = consEnum2 e2 in consInt i;
+        |]
 
     -- TODO: the kind checking should catch something like
     -- TyApp (&'a Hold) Int but it currently doesn't.

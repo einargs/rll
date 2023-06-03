@@ -31,7 +31,7 @@ These are eventual things to do for polishing.
 - [ ] A map holding info about where variables are dropped so I can give nice error messages about stuff
   being dropped.
 - [ ] Rewrite some of my error messages to assume the specified type is correct not the term.
-- [ ] check to make sure all top level functions are multi-use.
+- [ ] check to make sure no top-level functions are single use. We can have top level values tho.
 - [ ] Allow me to ommit the empty lifetime brackets in functions.
 - [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
 - [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
@@ -44,6 +44,10 @@ These are eventual things to do for polishing.
 - [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
 - [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
   and allow for better error messages.
+
+## Better Errors
+- [ ] Improve the context join error to highlight the areas that conflict and label them directly
+  with the conflicting variables.
 
 # Feature Thoughts
 Thoughts about various future features.
