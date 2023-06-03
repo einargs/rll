@@ -124,20 +124,29 @@ keywords = ["let", "in", "case", "copy", "drop", "rec", "enum", "forall", "struc
 spanTo :: Spans a => SourcePos -> a -> Span
 spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = unPos sl, startColumn = unPos sc}
 
-startPos :: Spans a => a -> SourcePos
-startPos s = SourcePos file (mkPos startLine) (mkPos startColumn)
-  where Span{file, startLine, startColumn} = getSpan s
+spanFrom :: Spans a => a -> SourcePos -> Span
+spanFrom sp (SourcePos _ el ec) = (getSpan sp) {endLine=unPos el, endColumn = unPos ec}
+
+spanFromTo :: (Spans a, Spans b) => a -> b -> Span
+spanFromTo start end = f (getSpan start) (getSpan end) where
+  f s Span{..} = s{endLine=endLine, endColumn=endColumn}
 
 mkParens :: Parser a -> Parser a
 mkParens = between (keyword "(") (keyword ")")
 
 kindp :: Parser Kind
-kindp = subKind <|> tyOpKind where
-  subKind = choice [tyKind, ltKind, parenKind]
-  parenKind = label "kind level parentheses" $ mkParens kindp
-  tyKind = label "type kind" $ keyword "Type" $> TyKind
-  ltKind = label "lifetime kind" $ keyword "Lifetime" $> LtKind
-  tyOpKind = label "type operator kind" $ TyOpKind <$> subKind <* arroww <*> kindp
+kindp = do
+  k1 <- subKind
+  tyOpContinue k1 <|> pure k1
+  where
+    subKind = choice [tyKind, ltKind, parenKind]
+    parenKind = label "kind level parentheses" $ mkParens kindp
+    tyKind = label "type kind" $ keyword "Type" $> TyKind
+    ltKind = label "lifetime kind" $ keyword "Lifetime" $> LtKind
+    tyOpContinue k1 = label "type operator kind" do
+      arroww
+      k2 <- kindp
+      pure $ TyOpKind k1 k2
 
 mult :: Parser Mult
 mult = C.char 'S' $> Single <|> C.char 'M' $> Many
@@ -146,12 +155,14 @@ branch :: Show a => String -> Parser a -> Parser a
 branch name = try . label name
 
 ty :: Parser Ty
-ty = funTy <|> subTy
+ty = do
+  t1 <- subTy
+  funTy t1 <|> pure t1
   where
-    subTy = tyApp <|> simpleTy
-    funTy = branch "function type" do
-      s1 <- getSourcePos
-      t1 <- subTy
+    subTy = do
+      t1 <- simpleTy
+      tyApp t1 <|> pure t1
+    funTy t1 = branch "function arrow" do
       C.char '-'
       m <- mult
       space
@@ -159,13 +170,11 @@ ty = funTy <|> subTy
       C.char '>'
       space
       t2 <- ty
-      pure $ FunTy m t1 lts t2 $ s1 `spanTo` t2
-    tyApp = branch "type operator application" do
-      s1 <- getSourcePos
-      ty1 <- simpleTy
+      pure $ FunTy m t1 lts t2 $ t1 `spanFromTo` t2
+    tyApp t1 = branch "type operator arguments" do
       args <- some simpleTy
-      let f t1 t2 = TyApp t1 t2 $ s1 `spanTo` t2
-      pure $ foldl' f ty1 args
+      let f t1 t2 = TyApp t1 t2 $ t1 `spanFromTo` t2
+      pure $ foldl' f t1 args
 
 ltJoin :: Parser Ty
 ltJoin = branch "lifetime join" do
@@ -238,14 +247,13 @@ tm = fullTm
             pure $ Right (t, s2)
       args <- some $ tyArg <|> (Left <$> subTm)
       space
-      let s1 = startPos t1
-          f l (Left r) = AppTm l r $ s1 `spanTo` r
-          f l (Right (r, s2)) = AppTy l r $ spanBetween s1 s2
+      let f l (Left r) = AppTm l r $ t1 `spanFromTo` r
+          f l (Right (r, s2)) = AppTy l r $ t1 `spanFrom` s2
       pure $ foldl' f t1 args
     anno term = label "type annotation" do
       colonw
       termTy <- ty
-      pure $ Anno term termTy $ startPos term `spanTo` termTy
+      pure $ Anno term termTy $ term `spanFromTo` termTy
     subTm = choice [tmVar, paren, caseTm, letStruct, letVar,
              tmCon, copy, refTm, drop,
              fixTm, funTm, poly]
@@ -300,7 +308,7 @@ tm = fullTm
             bind <- TyVarBinding <$> lowerText
             colonw
             k <- kindp
-            arroww
+            dotw
             pure $ Just (bind, k)
       mbBind <- pbind <|> pure Nothing
       body <- tm

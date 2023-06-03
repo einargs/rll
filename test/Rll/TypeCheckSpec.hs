@@ -5,104 +5,12 @@ import Test.Hspec
 import qualified Data.Text as T
 import qualified Text.Megaparsec as M
 
-import QuoteTxt
-import qualified Rll.Parser as RP
+import Rll.TypeCheckSpecUtil
 import Rll.TypeCheck
 import Rll.Ast
 import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
 
-processFile :: T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
-processFile text = mapM_ processDecl <$> M.parse RP.fileDecls "test.rll" text
-
-stdFile :: T.Text
-stdFile = [txt|
-struct Unit {}
-struct Int {}
-struct Str {}
-struct Pair { Int Str }
-enum Sum = Left Int | Right Str;
-enum Bool = True | False;
-
-struct Tuple (a:Type) (b:Type) { a b }
-
-enum Either (a:Type) (b:Type) = InL a | InR b;
-
-consInt : Int -M[]> Unit
-= \x -> let Int = x in Unit;
-
-consStr : Str -M[]> Unit
-= \x -> let Str = x in Unit;
-
-consPair : Pair -M[]> Unit
-= \p -> let Pair i s = p in
-let Int = i in let Str = s in Unit;
-
-consSum : Sum -M[]> Unit
-= \s -> case s of
-| Left i -> let Int = i in Unit
-| Right s -> let Str = s in Unit;
-|]
-
-baseCtx :: Ctx
-baseCtx = case runTc emptyCtx fileTc of
-  Left err -> error $ T.unpack $ prettyPrintError stdFile err
-  Right (_,ctx) -> ctx
-  where fileTc = case processFile stdFile of
-          Left err -> error $ M.errorBundlePretty err
-          Right v -> v
-
-buildChecker :: (Tm -> Ty -> Expectation) -> T.Text -> T.Text -> Expectation
-buildChecker cmp tmTxt tyTxt = do
-  termMay <- runP (RP.tm <* M.eof) tmTxt
-  typMay <- runP (RP.ty <* M.eof) tyTxt
-  case (termMay, typMay) of
-    (Just tm, Just ty) -> cmp tm ty
-    _ -> pure ()
-  where
-    runP :: RP.Parser a -> T.Text -> IO (Maybe a)
-    runP p txt = case M.parse (p <* M.eof) "test.rll" txt of
-      Right v -> pure $ Just v
-      Left err -> do
-        expectationFailure $ M.errorBundlePretty err
-        pure Nothing
-
-synthTo :: T.Text -> T.Text -> Expectation
-synthTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
-  f tm ty = case evalTc baseCtx (synth tm) of
-    Left err -> expectationFailure $ T.unpack $ prettyPrintError tmTxt err
-    Right ty' -> ty `shouldBe` ty
-
-checkTo :: T.Text -> T.Text -> Expectation
-checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
-  f tm ty = case evalTc baseCtx (check ty tm) of
-    Left err -> expectationFailure $ T.unpack $ prettyPrintError tmTxt err
-    Right _ -> pure ()
-
-mkTest :: Ctx -> T.Text -> Expectation
-mkTest ctx txt = case processFile txt of
-  Left err -> expectationFailure $ M.errorBundlePretty err
-  Right tc -> case evalTc ctx tc of
-    Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
-    Right _ -> pure ()
-
-rawTest = mkTest emptyCtx
-baseTest = mkTest baseCtx
-
-mkFailTest :: Ctx -> TyErr -> T.Text -> Expectation
-mkFailTest ctx err txt = case processFile txt of
-  Left err -> expectationFailure $ M.errorBundlePretty err
-  Right tc -> case evalTc ctx tc of
-    Left err' -> err' `shouldBe` err
-    Right _ -> expectationFailure "Expected to fail."
-
-baseFailTest = mkFailTest baseCtx
-
-es :: Span
-es = Span "test.rll" 1 1 1 1
-
-tyCon v = TyCon (Var v) es
-refTy v ty = RefTy (LtOf (Var v) es) ty es
 
 spec :: Spec
 spec = parallel do
@@ -158,7 +66,7 @@ spec = parallel do
     it "can check type application" do
       baseTest [txt|
         id : forall M [] t : Type . t -S[]> t
-        = ^ t : Type -> \v -> v;
+        = ^ t : Type. \v -> v;
         test1 : Unit -S[]> Unit
         = id [ Unit ];
 
@@ -175,7 +83,7 @@ spec = parallel do
           forall M [] l1 : Lifetime .
           forall S [] l2 : Lifetime .
           &l1 Int -S[]> &l2 Str -S[l1]> Unit
-        = ^ l1 : Lifetime -> ^ l2 : Lifetime -> \ir -> \sr ->
+        = ^ l1 : Lifetime. ^ l2 : Lifetime. \ir -> \sr ->
         drop ir in drop sr in Unit;
 
         test : Unit
@@ -289,7 +197,7 @@ spec = parallel do
           Unit -M[]>
           forall M [] l : Lifetime.
           &l Int -M[]> Int
-        = \x -> let Unit = x in ^ l : Lifetime -> \r -> drop r in Int;
+        = \x -> let Unit = x in ^ l : Lifetime. \r -> drop r in Int;
 
         copyInt3 :
           forall M [] l1 : Lifetime.
@@ -303,7 +211,7 @@ spec = parallel do
           &l1 Unit -M[]>
           forall M [] l : Lifetime.
           &l Int -M[]> Int
-        = ^l1:Lifetime -> \x -> drop x in ^ l : Lifetime -> \r -> drop r in Int;
+        = ^l1:Lifetime. \x -> drop x in ^ l : Lifetime. \r -> drop r in Int;
 
         test : Unit
         = let i = Int in
@@ -320,13 +228,13 @@ spec = parallel do
         enum Nat = Succ Nat | Zero;
 
         double : forall M [] l : Lifetime. &l Nat -M[]> Nat
-        = rec f -> ^ l : Lifetime ->
+        = rec f -> ^ l : Lifetime.
         \ x -> case x of
         | Zero -> Zero
         | Succ n -> Succ (Succ (copy f [l] n));
 
         add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
-        = rec f -> ^ l : Lifetime -> \natRef -> \nat ->
+        = rec f -> ^ l : Lifetime. \natRef -> \nat ->
         case natRef of
         | Succ n -> copy f [l] n (Succ nat)
         | Zero -> nat;
@@ -409,7 +317,7 @@ spec = parallel do
     it "can catch a reference used after being dropped" do
       baseFailTest (RemovedTermVar es es) [txt|
         copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ l : Lifetime -> \r -> drop r in Int;
+        = ^ l : Lifetime. \r -> drop r in Int;
 
         test : Int -M[]> Int
         = \a -> let b = &a in
@@ -455,7 +363,7 @@ spec = parallel do
         = ^ \a -> a;
 
         test : forall M [] t : Type. t -M[]> t
-        = ^ t : Type -> \a ->
+        = ^ t : Type. \a ->
         let b = id [&'a t] &a in
         drop b in a;
         |]
@@ -540,7 +448,7 @@ spec = parallel do
 
         mkCopier : forall M [] l : Lifetime.
           &l Int -M[]> Unit -M[l]> Int
-        = ^l:Lifetime -> \r->
+        = ^l:Lifetime. \r->
         let f = (\u:Unit -> let Unit = u in copyInt [l] (copy r)) in
         drop r in f;
 
@@ -564,7 +472,7 @@ spec = parallel do
         f : forall M [] t : Type.
           t -M[]> forall S [] l : Lifetime.
           &l t -S[]> t
-        = ^ t : Type -> \v -> ^ l : Lifetime ->
+        = ^ t : Type. \v -> ^ l : Lifetime.
         \ r -> drop r in v;
 
         test : Unit -M[]> Unit
@@ -580,8 +488,8 @@ spec = parallel do
           forall S [] l2 : Lifetime.
           &l1 Unit -S[]> &l2 Unit -S[l1]>
           forall S [l1, l2] t : Type. t -S[l1, l2]> t
-        = \x -> ^ l1 : Lifetime -> ^l2 : Lifetime ->
-        \r1 -> \r2 -> ^ t:Type -> \y ->
+        = \x -> ^ l1 : Lifetime. ^l2 : Lifetime.
+        \r1 -> \r2 -> ^ t:Type. \y ->
         let Unit = x in
         drop r1 in drop r2 in y;
 
@@ -675,6 +583,11 @@ spec = parallel do
           &l Str -M[]> Str
         = ^ \r -> drop r in Str;
 
+        copyInt :
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
         test : Unit
         = let tup = Tuple [Str] [Int] Str Int in
         let Tuple s i = &tup in
@@ -682,22 +595,72 @@ spec = parallel do
         let tup2 = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
         let Tuple s i = tup in
         let Str = s in let Int = i in
-        let Tuple i stup = &tup2 in
-        drop i in
-        let Tuple s1 s2 = copy stup in
+        let Tuple i stup = &tup2 : &'tup2 (Tuple Int (Tuple Str Str)) in
+        let Int = copyInt ['tup2] i in
+        let Tuple s1 s2 = (copy stup : &'tup2 (Tuple Str Str)) in
         drop stup in
         let Str = copyStr ['tup2] s1 in
-        drop s1 in drop s2 in
+        let Str = copyStr ['tup2] s2 in
         let Tuple i stup = tup2 in
         let Int = i in let Tuple s1 s2 = stup in
         let Str = s1 in let Str = s2 in
         Unit;
         |]
 
-    -- it "can take a higher kind as a type argument" do
+    it "makes sure copy correctly maintains the type of a sub-reference" do
+      baseTest [txt|
+        copyStr :
+          forall M [] l : Lifetime.
+          &l Str -M[]> Str
+        = ^ \r -> drop r in Str;
+
+        copyInt :
+          forall M [] l : Lifetime.
+          &l Int -M[]> Int
+        = ^ \r -> drop r in Int;
+
+        test : Unit
+        = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
+        let Tuple i stup = &tup : &'tup (Tuple Int (Tuple Str Str)) in
+        let Int = copyInt ['tup] copy i in
+        let Tuple s1 s2 = (copy stup : &'tup (Tuple Str Str)) in
+        drop stup in
+        let Str = copyStr ['tup] copy s1 in
+        let Str = copyStr ['tup] copy s2 in
+        drop s1 in drop s2 in drop i in
+        let Tuple i stup = tup in
+        let Int = i in let Tuple s1 s2 = stup in
+        let Str = s1 in let Str = s2 in
+        Unit;
+        |]
+
+
+    it "can take a higher kind as a type argument" do
+      baseTest [txt|
+        struct Hold (a:Type) { a }
+        higher : forall M [] h : Type -> Type. (Unit -M[]> h Unit) -S[]> h Unit
+        = ^ \ c -> c Unit;
+
+        test : Hold Unit
+        = higher [Hold] (Hold [Unit]);
+        |]
+
+    -- it "can check complex usage of a generic enum" do
     --   baseTest [txt|
     --     test : Unit = Unit
     --     |]
+
+    -- TODO: the kind checking should catch something like
+    -- TyApp (&'a Hold) Int but it currently doesn't.
+
+    -- TODO: test to make sure that using a type or tyop kind where a lifetime
+    -- is required throws an error.
+
+    -- TODO: test to make sure that a non-sense reference in a type is caught.
+    -- write a verifyType function and use it whenever a type enters the type checker.
+
+    -- TODO: can take a reference to a term constructor.
+
 
 
 
@@ -708,6 +671,3 @@ spec = parallel do
     --   baseTest [txt|
     --     test : Unit = Unit
     --     |]
-
-    -- TODO make sure I don't have any problems with type substitution
-    -- capturing a free variable in lifetimes.

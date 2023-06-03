@@ -247,8 +247,8 @@ alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f) v
   -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 -- | Use this to construct the type of a reference type.
-borrowVar :: Var -> Span -> Tc Ty
-borrowVar v s = do
+createVarRef :: Var -> Span -> Tc Ty
+createVarRef v s = do
   t <- lookupVar v s
   case t of
     RefTy _ _ _ -> throwError $ CannotRefOfRef t s
@@ -301,7 +301,7 @@ lifetimeSet ty@(TyVar x s) = do
   k <- lookupKind x s
   case k of
     LtKind -> pure $ S.singleton $ (s, Left x)
-    TyKind -> throwError $ ExpectedKind LtKind TyKind s
+    _ -> throwError $ ExpectedKind LtKind k s
 lifetimeSet ty = throwError $ ExpectedKind LtKind TyKind $ getSpan ty
 
 -- | Get a set of all lifetimes mentioned in a type relative to the context.
@@ -666,7 +666,7 @@ letStructClause letSpan structCon memberVars t1 body method = do
   case t1Ty of
     RefTy lt structTy _ -> do
       useRef t1Ty
-      let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
+      let f svar ty = T.trace (show svar.var <> ": " <> show ty) $ addPartialBorrowVar svar.var svar.span lt ty
       handle f structTy
     _ -> do
       let f svar ty = addVar svar.var svar.span ty
@@ -815,10 +815,12 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
   Copy v s -> do
     vTy <- lookupVar v s
     case vTy of
-      RefTy (LtOf v' _ ) _ _ -> borrowVar v' s
+      RefTy (LtOf v' _ ) _ _ -> do
+        alterBorrowCount v' (+1)
+        pure vTy
       RefTy _ _ _ -> pure vTy
       _ -> throwError $ CannotCopyNonRef vTy s
-  RefTm v s -> T.trace ("borrowing " <> show v) $ borrowVar v s
+  RefTm v s -> T.trace ("borrowing " <> show v) $ createVarRef v s
   Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 synth
   Case t1 branches s -> caseClause s t1 branches synth
   FunTm v (Just vTy) body s -> synthFun s v vTy body

@@ -60,7 +60,11 @@ data Span = Span
   , endLine :: !Int
   , endColumn :: !Int
   }
-  deriving Show
+
+instance Show Span where
+  show Span{..} = file <> " " <> p startLine startColumn <> "-" <> p endLine endColumn where
+    p a b = show a <> ":" <> show b
+
 
 instance Hashable Span where
   hashWithSalt s _ = hashWithSalt s (0::Int)
@@ -128,7 +132,7 @@ instance Show Ty where
     where m' = case m of
             Many -> "M"
             Single -> "S"
-  show (TyApp t1 t2 _) = show t1 <> " " <> show t2
+  show (TyApp t1 t2 _) = "(" <> show t1 <> ") " <> " (" <> show t2 <> ")"
 
 instance Spans Ty where
   getSpan ty = case ty of
@@ -139,6 +143,7 @@ instance Spans Ty where
     LtJoin _ s -> s
     RefTy _ _ s -> s
     Univ _ _ _ _ _ s -> s
+    TyApp _ _ s -> s
 
 data CaseBranch = CaseBranch SVar [SVar] Tm
   deriving (Show, Eq)

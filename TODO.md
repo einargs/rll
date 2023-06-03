@@ -1,8 +1,5 @@
 # Current
-- [ ] Add kind checking to applying a type argument to poly/univ.
-- [ ] Code to take the inferred type for a case of or let struct expr, check that it's
-  fully applied, and then use that to substitute the correct types for each branch and such.
-  Something like `Ty -> Span -> Tc [Ty]`
+- [ ] I need to implement an anti-rank-2 check.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -10,13 +7,8 @@ I'm thinking that I'll have a fully annotated IR that stuff gets translated to a
 So closures will have a list of what they need to be able to hold -- both references and moved/consumed
 values.
 
-- [ ] I need to change how I handle Univ and Poly. Right now the hack to deal with a recursive
-  function that needs to be polymorphic is just awful. (I have to take a dummy parameter and return
-  the function.)
-  - I could make that kind of thing part of the recursive function definition. No, that
-    doesn't work because then how would normal functions work? I can't use a fix combinator.
-  - No, I could make a fix combinator that only works for mult stuff and just exposes it to the
-    internals?
+- [ ] I need to change how I handle Univ and Poly.
+- [ ] Allow rank 2 types when they're the same representation (i.e. variables inside boxes).
 
 # Eventual Polish
 These are eventual things to do for polishing.
@@ -49,6 +41,9 @@ These are eventual things to do for polishing.
   argument.
 - [ ] Test to make sure that a TypeIsNotStruct error on a reference to a type doesn't highlight
   the entire type, just the inside of the reference type.
+- [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
+- [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
+  and allow for better error messages.
 
 # Feature Thoughts
 Thoughts about various future features.
