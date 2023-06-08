@@ -23,8 +23,8 @@ es = Span "test.rll" 1 1 1 1
 tyCon v = TyCon (Var v) es
 refTy v ty = RefTy (LtOf (Var v) es) ty es
 
-processFile :: T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
-processFile text = mapM_ processDecl <$> M.parse RP.fileDecls "test.rll" text
+processFile :: String -> T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
+processFile filename text = mapM_ processDecl <$> M.parse RP.fileDecls filename text
 
 stdFile :: T.Text
 stdFile = [txt|
@@ -59,20 +59,20 @@ baseCtx :: Ctx
 baseCtx = case runTc emptyCtx fileTc of
   Left err -> error $ T.unpack $ prettyPrintError stdFile err
   Right (_,ctx) -> ctx
-  where fileTc = case processFile stdFile of
+  where fileTc = case processFile "ctx.rll" stdFile of
           Left err -> error $ M.errorBundlePretty err
           Right v -> v
 
 buildChecker :: HasCallStack => (Tm -> Ty -> Expectation) -> T.Text -> T.Text -> Expectation
 buildChecker cmp tmTxt tyTxt = do
-  termMay <- runP (RP.tm <* M.eof) tmTxt
-  typMay <- runP (RP.ty <* M.eof) tyTxt
+  termMay <- runP "term.rll" RP.tm tmTxt
+  typMay <- runP "type.rll" RP.ty tyTxt
   case (termMay, typMay) of
     (Just tm, Just ty) -> cmp tm ty
     _ -> pure ()
   where
-    runP :: RP.Parser a -> T.Text -> IO (Maybe a)
-    runP p txt = case M.parse (p <* M.eof) "test.rll" txt of
+    runP :: String -> RP.Parser a -> T.Text -> IO (Maybe a)
+    runP filename p txt = case M.parse (p <* M.eof) filename txt of
       Right v -> pure $ Just v
       Left err -> do
         expectationFailure $ M.errorBundlePretty err
@@ -91,7 +91,7 @@ checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
     Right _ -> pure ()
 
 mkTest :: HasCallStack => Ctx -> T.Text -> Expectation
-mkTest ctx txt = case processFile txt of
+mkTest ctx txt = case processFile "test.rll" txt of
   Left err -> expectationFailure $ M.errorBundlePretty err
   Right tc -> case evalTc ctx tc of
     Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
@@ -104,7 +104,7 @@ baseTest :: HasCallStack => T.Text -> Expectation
 baseTest = mkTest baseCtx
 
 mkFailTest :: HasCallStack => Ctx -> TyErr -> T.Text -> Expectation
-mkFailTest ctx err txt = case processFile txt of
+mkFailTest ctx err txt = case processFile "test.rll" txt of
   Left err -> expectationFailure $ M.errorBundlePretty err
   Right tc -> case evalTc ctx tc of
     Left err' -> err' `shouldBe` err

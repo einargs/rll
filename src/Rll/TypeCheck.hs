@@ -123,18 +123,47 @@ indexTyVarsInTm = g 0 M.empty where
     _ -> pure term
     where f = g i idxMap
 
--- | Before introducing an argument of a given type, first make sure
--- the type makes sense.
-sanityCheckType :: Ty -> Tc ()
-sanityCheckType ty = case ty of
-  TyCon v s -> void $ lookupDataType v s
-  LtOf v s -> void $ lookupEntry v s
-  FunTy _ aTy lts bTy _ -> f aTy *> f lts *> f bTy
-  LtJoin tys _ -> forM_ tys f
-  RefTy lt aTy _ -> f lt *> f aTy
-  Univ _ lts _ _ bodyTy _ -> f lts *> f bodyTy
-  _ -> pure ()
-  where f = sanityCheckType
+-- | Get the kind of the type. Also checks that the type is well formed.
+kindOf :: Ty -> Tc Kind
+kindOf ty = case ty of
+  TyVar tv s -> lookupKind tv s
+  TyCon name s -> lookupDataType name s >>= \case
+    StructType _ tyParams _ _ -> pure $ kindFrom tyParams
+    EnumType tyParams _ _ -> pure $ kindFrom tyParams
+  LtOf v s -> lookupEntry v s *> pure LtKind
+  FunTy _ aTy lts bTy _ -> do
+    kindCheck TyKind aTy
+    kindCheck LtKind lts
+    kindCheck TyKind bTy
+    pure TyKind
+  LtJoin tys _ -> do
+    forM_ tys (kindCheck LtKind)
+    pure LtKind
+  RefTy lt aTy _ -> do
+    kindCheck LtKind lt
+    kindCheck TyKind aTy
+    pure TyKind
+  Univ _ lts _ tyVarKind bodyTy _ -> do
+    kindCheck LtKind lts
+    withKind tyVarKind $ kindCheck TyKind bodyTy
+    pure TyKind
+  TyApp ty1 ty2 s -> do
+    k1 <- kindOf ty1
+    case k1 of
+      TyOpKind ak bk -> do
+        kindCheck ak ty2
+        pure bk
+      _ -> throwError $ IsNotTyOp k1 $ getSpan ty1
+  where
+    kindFrom :: [TypeParam] -> Kind
+    kindFrom tyParams = foldr TyOpKind TyKind $ (.kind) <$> tyParams
+
+-- | Check that the type has the given kind and that the type
+-- is overall well formed.
+kindCheck :: Kind -> Ty -> Tc ()
+kindCheck k ty = do
+  k' <- kindOf ty
+  unless (k==k') $ throwError $ ExpectedKind k k' $ getSpan ty
 
 -- | Throws either `UnknownTermVar` or `RemovedTermVar`.
 expectedTermVar :: Var -> Span -> Tc a
@@ -161,29 +190,6 @@ lookupKind v@(MkTyVar name i) s = do
   case atMay l i of
     Just k -> pure k
     Nothing -> throwError $ UnknownTypeVar v s
-
-kindOf :: Ty -> Tc Kind
-kindOf ty = case ty of
-  TyVar tv s -> lookupKind tv s
-  TyCon name s -> lookupDataType name s >>= \case
-    StructType _ tyParams _ _ -> pure $ kindFrom tyParams
-    EnumType tyParams _ _ -> pure $ kindFrom tyParams
-  LtOf _ _ -> pure LtKind
-  FunTy _ _ _ _ _ -> pure TyKind
-  LtJoin _ _ -> pure LtKind
-  RefTy _ _ _ -> pure TyKind
-  Univ _ _ _ _ _ _ -> pure TyKind
-  TyApp ty1 ty2 s -> do
-    k1 <- kindOf ty1
-    case k1 of
-      TyOpKind ak bk -> do
-        k2 <- kindOf ty2
-        unless (ak == k2) $ throwError $ ExpectedKind ak k2 $ getSpan ty2
-        pure bk
-      _ -> throwError $ IsNotTyOp k1 $ getSpan ty1
-  where
-    kindFrom :: [TypeParam] -> Kind
-    kindFrom tyParams = foldr TyOpKind TyKind $ (.kind) <$> tyParams
 
 lookupDataType :: Var -> Span -> Tc DataType
 lookupDataType v s = do
@@ -268,7 +274,7 @@ addVar v s ty = do
         Just (def,_) -> pure def
       throwError $ VarAlreadyInScope v s def
     Nothing -> do
-      sanityCheckType ty
+      kindCheck TyKind ty
       put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
                ,varLocs=M.insert v (s,Nothing) ctx.varLocs}
 
@@ -315,6 +321,7 @@ ltsInTy ctx typ = S.fromList $ f typ [] where
     TyVar tv s -> case getKind tv of
       LtKind -> (s, Left tv ):l
       TyKind -> l
+      TyOpKind _ _ -> l
     RefTy t1 t2 _ -> f t1 $ f t2 l
     LtJoin tys _ -> foldl' (flip f) l tys
     FunTy _ t1 t2 t3 _ -> f t2 l
@@ -810,8 +817,11 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
     synth t
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 synth
   TmCon v s -> lookupDataCon v s
-  Anno t ty _ -> check ty t >> pure ty
-  TmVar v s -> T.trace ("using " <> show v) $ useVar v s
+  Anno t ty _ -> do
+    kindCheck TyKind ty
+    check ty t
+    pure ty
+  TmVar v s -> useVar v s
   Copy v s -> do
     vTy <- lookupVar v s
     case vTy of
@@ -820,7 +830,7 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
         pure vTy
       RefTy _ _ _ -> pure vTy
       _ -> throwError $ CannotCopyNonRef vTy s
-  RefTm v s -> T.trace ("borrowing " <> show v) $ createVarRef v s
+  RefTm v s -> createVarRef v s
   Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 synth
   Case t1 branches s -> caseClause s t1 branches synth
   FunTm v (Just vTy) body s -> synthFun s v vTy body
@@ -912,6 +922,7 @@ processDecl decl = case decl of
   FunDecl name ty body s -> do
     ctx <- get
     ty' <- indexTyVars ty
+    kindCheck TyKind ty'
     body' <- indexTyVarsInTm body
     check ty' body'
     put ctx

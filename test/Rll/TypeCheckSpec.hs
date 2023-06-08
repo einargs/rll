@@ -725,16 +725,58 @@ spec = parallel do
         | InL i -> let Unit = consEnum2 e2 in consInt i;
         |]
 
-    -- TODO: the kind checking should catch something like
-    -- TyApp (&'a Hold) Int but it currently doesn't.
+    it "can catch taking a reference to something without kind Type" do
+      baseFailTest (ExpectedKind TyKind (TyOpKind TyKind TyKind) es) [txt|
+        struct Hold (a:Type) { a }
+        test : forall M [] l : Lifetime.
+          (&l Hold) -M[]> (&l Hold)
+        = ^ \v -> v;
+        |]
 
-    -- TODO: test to make sure that using a type or tyop kind where a lifetime
-    -- is required throws an error.
+    it "can catch bad type application" do
+      baseFailTest (IsNotTyOp TyKind es) [txt|
+        test : forall M [] l : Lifetime.
+          (&l Int) Int -M[]> (&l Int) Int
+        = ^ \v -> v;
+        |]
 
-    -- TODO: test to make sure that a non-sense reference in a type is caught.
-    -- write a verifyType function and use it whenever a type enters the type checker.
+    it "can catch non-sense types" do
+      baseFailTest (ExpectedKind TyKind LtKind es) [txt|
+        id :
+          forall M [] t : Type.
+          t -M[]> t
+        = ^ \v -> v;
 
-    -- TODO: can take a reference to a term constructor.
+        test : Unit
+        = let a = Str in
+        let Str = id ['a] a in Unit;
+        |]
+
+    it "can catch a malformed type in return position" do
+      baseFailTest (ExpectedKind TyKind (TyOpKind TyKind TyKind) es) [txt|
+        struct Hold (a:Type) { a }
+        test : forall M [] l : Lifetime. Unit -M[]> (&l Hold) Unit
+        = ^ \v -> v;
+        |]
+
+    it "can catch using a type instead of a lifetime" do
+      baseFailTest (ExpectedKind LtKind TyKind es) [txt|
+        test : Unit -M[Int]> Unit
+        = \v -> v;
+        |]
+
+    it "can take a type operator as a kind argument" do
+      baseTest [txt|
+        enum ListF (a:Type) (b:Type)
+          = NilF
+          | ConsF a b;
+        struct Fix (f:Type -> Type) { (f (Fix f)) }
+        test : Fix (ListF Int) = Fix [ListF Int]
+          (ConsF [Int] [Fix (ListF Int)] Int
+            (Fix [ListF Int]
+              (NilF [Int] [Fix (ListF Int)])));
+        |]
+
 
 
 

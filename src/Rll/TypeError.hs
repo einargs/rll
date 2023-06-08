@@ -332,6 +332,9 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
     TyIsNotFun ty s -> spanMsg s $
       "Term is not a function. Type: " <> tshow ty
 
+    IsNotTyOp kind s -> spanMsg s $
+      "Kind " <> tshow kind <> " is not a type operator and cannot take an argument."
+
     CompilerLogicError msg mbSpan ->
       let blocks = case mbSpan of
             Just s -> [defBlock s Nothing (defaultSpanToPtrs s) Nothing]
