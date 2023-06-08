@@ -777,6 +777,18 @@ spec = parallel do
               (NilF [Int] [Fix (ListF Int)])));
         |]
 
+    it "can catch mismatched contexts" do
+      let diffs = [[(Var "i",0,tyCon "Int")],[]]
+          diffs' = (es,) <$> diffs
+      baseFailTest (CannotJoinCtxs diffs' es) [txt|
+        test : Unit
+        = let Unit = case Left Int of
+        | Left i -> Unit
+        | Right s -> let Str = s in Unit
+        in Unit;
+        |]
+
+
 
 
 

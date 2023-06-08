@@ -507,27 +507,32 @@ instance TcMethodResult () where
 
 -- | Join type checking actions on multiple branches of a case statement.
 --
--- We parameterize over equality for switching between synthesis and checking.
+-- We parameterize over TcMethodResult for switching between synthesis and checking.
 --
--- The span is the span of the overall case statement.
-joinBranches :: forall a. TcMethodResult a => Span -> [Tc a] -> Tc a
+-- The span is the span of the overall case statement. Each branch has a span for the
+-- body of that branch.
+joinBranches :: forall a. TcMethodResult a => Span -> [(Span, Tc a)] -> Tc a
 joinBranches s [] = throwError $ NoCaseBranches s
-joinBranches s [b] = b
-joinBranches s (b:bs) = do
+joinBranches s [(_,b)] = b
+joinBranches s ((s1,b):bs) = do
   ctx <- get
-  ty <- b
+  ty1 <- b
   ctx1 <- get
-  let f b = do
+  let f (s,b) = do
         put ctx
         bTy <- b
         ctx' <- get
-        pure $ (bTy, ctx')
-  (tys,ctxs) <- unzip <$> traverse f bs
-  unless (all (localEq ctx1) ctxs) $ throwError $ CannotJoinCtxs (ctx1:ctxs) s
-  () <- case getTcMethod @a of
+        pure $ ((s,bTy),s,ctx')
+  (sTys,spans,ctxs) <- unzip3 <$> traverse f bs
+  unless (all (localEq ctx1) ctxs) $
+    let ctxs' = diffCtxTerms $ ctx1:ctxs
+        sCtxs = zip (s1:spans) ctxs'
+    in throwError $ CannotJoinCtxs sCtxs s
+  case getTcMethod @a of
     Check -> pure ()
-    Synth -> unless (all (ty==) tys) $ throwError $ CannotJoinTypes (ty:tys) s
-  pure ty
+    Synth -> do
+      unless (all ((ty1==) . snd) sTys) $ throwError $ CannotJoinTypes ((s1,ty1):sTys) s
+      pure ty1
 
 toRef :: Span -> Ty -> Ty -> Ty
 toRef s lt ty@(RefTy _ _ _) = ty
@@ -612,12 +617,16 @@ caseClause caseSpan t1 branches method = do
       useRef t1Ty
       (tyName,conMap) <- ensureEnum enumTy
       let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
-      joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
+      joinBranches caseSpan $ buildHandler f tyName conMap <$> branches
     _ -> do
       (tyName,conMap) <- ensureEnum t1Ty
       let f sv ty = addVar sv.var sv.span ty
-      joinBranches caseSpan $ handleBranch f tyName conMap <$> branches
+      joinBranches caseSpan $ buildHandler f tyName conMap <$> branches
   where
+    -- | Just here to extract the span and package it nicely alongside the handleBranch result.
+    buildHandler :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> (Span, Tc a)
+    buildHandler addMember tyName conMap cb@(CaseBranch _ _ body) =
+      (getSpan body, handleBranch addMember tyName conMap cb)
     ensureEnum :: Ty -> Tc (Var, M.HashMap Text [Ty])
     ensureEnum enumTy = do
       (tyName, conMap) <- getEnumCaseMap enumTy

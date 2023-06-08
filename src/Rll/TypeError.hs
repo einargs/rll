@@ -10,6 +10,9 @@ import Errata.Styles qualified as S
 import Data.Vector.Unboxed qualified as V
 import Debug.Trace qualified as D
 import Data.HashMap.Strict qualified as M
+import Prettyprinter qualified as P
+import Prettyprinter ((<+>))
+import Prettyprinter.Render.Text qualified as PRT
 
 import Rll.Ast
 import Rll.Context
@@ -51,9 +54,11 @@ data TyErr
   -- | Case statement has no branches.
   | NoCaseBranches Span
   -- | The end contexts of different branches of a case statement can't join.
-  | CannotJoinCtxs [Ctx] Span
+  --
+  -- Uses the output of `diffCtxTerms` minus the borrow count.
+  | CannotJoinCtxs [(Span, [(Var,Int,Ty)])] Span
   -- | The result types of different branches of a case statement aren't equal.
-  | CannotJoinTypes [Ty] Span
+  | CannotJoinTypes [(Span, Ty)] Span
   -- | A reference to a single variable cannot have a composite lifetime (`LtJoin`).
   --
   -- The type and a span indicating the reference.
@@ -166,8 +171,11 @@ data TyErr
   | IsNotTyOp Kind Span
   deriving (Eq, Show)
 
-tshow :: Show a => a -> Text
-tshow = T.pack . show
+tpretty :: P.Pretty a => a -> Text
+tpretty = ptext . P.pretty
+
+ptext :: P.Doc ann -> Text
+ptext = PRT.renderStrict . P.layoutSmart P.defaultLayoutOptions
 
 varList :: [Var] -> Text
 varList = T.intercalate ", " . fmap (.name)
@@ -200,20 +208,18 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
 
   errMsg = case err of
     -- TODO: equip with spans for each context so I can nicely point at each context.
-    CannotJoinCtxs ctxs s ->
-      let f (v,bc,ty) = v.name <> ": " <> tshow ty
-          g ctx = "[" <> T.intercalate ", " (f <$> ctx) <> "]"
-          msg = T.unlines $ g <$> diffCtxTerms ctxs
-      in block s
-        (Just "Cannot join contexts")
-        (spanToPtrs False Nothing S.fancyRedPointer s)
-        (Just msg)
+    CannotJoinCtxs sCtxs s ->
+      let f (v,bc,ty) = P.pretty v <+> P.parens (P.pretty bc) <> ": " <> P.pretty ty
+          toBlock (s, ctx) = simpleBlock s (ptext $ P.list $ f <$> ctx)
+          blocks = toBlock <$> sCtxs
+      in E.Errata (Just "Cannot join contexts:") blocks Nothing
 
     -- TODO: maybe have a block showing where the expected type came from?
-    ExpectedButInferred exp inf s -> block s
-      (Just $ T.unwords ["Expected", tshow exp, "but got", tshow inf])
-      (spanToPtrs False Nothing S.fancyRedPointer s)
-      Nothing
+    ExpectedButInferred exp inf s ->
+      spanMsg s $ ptext $ P.vsep $ P.group <$>
+      ["Expected:" <> P.line <> P.pretty exp
+      , "But got:" <> P.line <> P.pretty inf
+      ]
 
     SynthRequiresAnno s -> block s
       (Just "Type synthesis requires an argument annotation.")
@@ -238,15 +244,17 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
 
     IncorrectBorrowedVars borrowedTy inferredLts s ->
       let tySpan = getSpan borrowedTy
-          inferListTxt = "inferred borrow list: " <> tshow inferredLts
-          headerMsg = T.unwords ["inferred borrow list", tshow inferredLts,
-                                 "did not match specified borrow list."]
+          inferListTxt = ptext $ "inferred borrow list:" <+> P.pretty inferredLts
+          headerMsg = ptext $ P.fillSep
+            ["inferred borrow list"
+            , P.pretty inferredLts
+            , "did not match specified borrow list."]
           specMsg = "borrow list specified here:"
           funcBody = "in function body"
           f :: Ty -> E.Block
           f ty = defBlock s (Just msg) (defaultSpanToPtrs s) Nothing
             where s = getSpan ty
-                  msg = "inferrred " <> tshow ty <> " from:"
+                  msg = ptext $ "inferrred" <+> P.pretty ty <+> "from:"
           inferredLocs = f <$> inferredLts
       in E.Errata
         (Just headerMsg)
@@ -323,17 +331,17 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
     CannotCopyNonRef ty s -> spanMsg s
       "Can only copy a reference."
 
-    TypeIsNotEnum ty s -> spanMsg s $
-      "expected an enum here, instead got type " <> tshow ty
+    TypeIsNotEnum ty s -> spanMsg s $ ptext $
+      "expected an enum here, instead got type:" <> P.softline <> P.pretty ty
 
-    TypeIsNotStruct ty s -> spanMsg s $
-      "expected a struct here, instead got type " <> tshow ty
+    TypeIsNotStruct ty s -> spanMsg s $ ptext $
+      "expected a struct here, instead got type:" <> P.softline <> P.pretty ty
 
-    TyIsNotFun ty s -> spanMsg s $
-      "Term is not a function. Type: " <> tshow ty
+    TyIsNotFun ty s -> spanMsg s $ ptext $
+      "Term is not a function. Type:" <> P.softline <> P.pretty ty
 
-    IsNotTyOp kind s -> spanMsg s $
-      "Kind " <> tshow kind <> " is not a type operator and cannot take an argument."
+    IsNotTyOp kind s -> spanMsg s $ ptext $
+      "Kind" <+> P.pretty kind <+> "is not a type operator and cannot take an argument."
 
     CompilerLogicError msg mbSpan ->
       let blocks = case mbSpan of
@@ -342,13 +350,15 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       in E.Errata (Just msg) blocks Nothing
 
     -- TODO: fix up this message
-    BadLetStructVars vars tys -> spanMsg (getSpan $ head vars) $
-      T.concat ["There was a problem with the variables in this let struct.\n"
-                , "Vars: ", tshow vars, "\nExpected Types: ", tshow tys]
+    BadLetStructVars vars tys -> spanMsg (getSpan $ head vars) $ ptext $
+      P.vsep $ [ "There was a problem with the variables in this let struct."
+               , "Vars:" <+> P.pretty vars
+               , "Expected Types:" <+> P.pretty tys
+               ]
 
-    UnknownDataType name s -> spanMsg s $ "Unknown data type: " <> tshow name
+    UnknownDataType name s -> spanMsg s $ ptext $ "Unknown data type" <+> P.pretty name
 
-    UnknownTypeVar name s -> spanMsg s $ "Unknown type variable " <> tshow name
+    UnknownTypeVar name s -> spanMsg s $ ptext $ "Unknown type variable" <+> P.pretty name
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]

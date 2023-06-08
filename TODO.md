@@ -44,6 +44,7 @@ These are eventual things to do for polishing.
 - [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
 - [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
   and allow for better error messages.
+- [ ] Eventually every error should have a test to make sure it triggers correctly.
 
 ## Better Errors
 - [ ] Improve the context join error to highlight the areas that conflict and label them directly
