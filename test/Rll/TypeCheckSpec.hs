@@ -14,10 +14,6 @@ import Rll.Context
 
 spec :: Spec
 spec = parallel do
-  -- describe "varsBorrowedIn" do
-  --   it "can derive a list of borrowed variables" do
-  --     let ctx = Ctx
-  --     varsBorrowedIn
   describe "type checking" do
     it "Standard context parses" do
       rawTest stdFile
