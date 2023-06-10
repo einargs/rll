@@ -1,14 +1,10 @@
 {-# LANGUAGE BlockArguments, OverloadedStrings, QuasiQuotes #-}
 module Rll.TypeCheckSpec where
 
-import Rll.TypeCheck
 import Rll.Ast
-import Rll.TypeError (prettyPrintError, TyErr(..))
-import Rll.Context
+import Rll.TypeError (TyErr(..))
 
 import Test.Hspec
-import qualified Data.Text as T
-import qualified Text.Megaparsec as M
 
 import Rll.TypeCheckSpecUtil
 
@@ -793,6 +789,18 @@ spec = parallel do
         test : forall M [] l : Lifetime.
           &l (forall M [] x : Type. x -M[]> x) -M[]> Unit
         = ^ \r -> drop r in Unit;
+        |]
+
+    it "can check integer literals" do
+      baseTest [txt|
+        i1 : I64 = 14566;
+        i2 : I64 = -13561;
+        |]
+
+    it "can check string literals" do
+      baseTest [txt|
+        s1 : String = "hello ";
+        s2 : String = "Everyone";
         |]
 
 

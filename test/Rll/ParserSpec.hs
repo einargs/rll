@@ -7,30 +7,30 @@ import Data.Text (Text)
 import qualified Text.Megaparsec as M
 import Data.Either (isLeft)
 import System.Timeout (timeout)
+import Control.Monad (unless)
 
 import QuoteTxt
 import Rll.Parser
 import Rll.Ast
 
-mkParserChecker :: (Show a, Eq a) => Parser a -> a -> T.Text -> Expectation
+mkParserChecker :: (HasCallStack, Show a, Eq a) => Parser a -> a -> T.Text -> Expectation
 mkParserChecker p v text = case M.parse (p <* M.eof) "test.rll" text of
   Right v' -> v' `shouldBe` v
   Left err -> expectationFailure $ M.errorBundlePretty err
 
-es :: Span
-es = Span "test.rll" 1 1 1 1
-
+tmFrom :: (HasCallStack) => Tm -> T.Text -> Expectation
 tmFrom = mkParserChecker tm
-tyFrom = mkParserChecker ty
-declFrom = mkParserChecker decl
 
-sv :: Text -> SVar
-sv t = (SVar (Var t) es)
+tyFrom :: (HasCallStack) => Ty -> T.Text -> Expectation
+tyFrom = mkParserChecker ty
+
+declFrom :: (HasCallStack) => Decl -> T.Text -> Expectation
+declFrom = mkParserChecker decl
 
 parseShouldError :: (Show a, Eq a) => Parser a -> T.Text -> Expectation
 parseShouldError p t = do
   let result = M.parse (p <* M.eof) "test.rll" t
-  result `shouldSatisfy` isLeft
+  unless (isLeft result) $ expectationFailure "should have parse error"
 
 -- | Just checks to make sure that there are no errors parsing the file.
 canParse :: Text -> Expectation
@@ -44,6 +44,12 @@ canParse text = do
     attempt = case M.parse fileDecls "test.rll" text of
       Left err -> expectationFailure $ M.errorBundlePretty err
       Right _ -> pure ()
+
+es :: Span
+es = Span "test.rll" 1 1 1 1
+
+sv :: Text -> SVar
+sv t = (SVar (Var t) es)
 
 spec :: Spec
 spec = parallel do
@@ -73,7 +79,7 @@ spec = parallel do
     it "parses a polymorphic abstraction" do
       let t = Poly (Just (TyVarBinding "x", LtKind)) (TmVar (Var "y") es) es
           t2 = Poly Nothing (tmVar "y") es
-      t `tmFrom` "^x:Lifetime -> y"
+      t `tmFrom` "^x:Lifetime. y"
       t2 `tmFrom` "^ y"
       t2 `tmFrom` "^y"
     it "parses term variable" do
@@ -99,6 +105,12 @@ spec = parallel do
       t `tmFrom` "rec f -> \\ x -> x"
     it "parses type application" do
       Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"
+    it "parses an integer literal" do
+      IntLit 51 es `tmFrom` "51"
+      IntLit (-47) es `tmFrom` "-47"
+      parseShouldError tm "- 13"
+    it "parses a string literal" do
+      StringLit "hello darkness my old friend" es `tmFrom` [txt|"hello darkness my old friend"|]
     it "throws an error for nonsense" do
       -- TODO: seems to badly infinite loop and grow and run everything out of resources?
       parseShouldError tm "!@#@! "
@@ -126,7 +138,7 @@ spec = parallel do
       let t = FunTy Single unitTy ltJoinXY unitTy es
       t `tyFrom` "Unit-S['x,'y]>Unit"
       t `tyFrom` "Unit -S[ 'x, 'y ]> Unit"
-      parseShouldError ty "Unit -S [ 'x, 'y ] > Unit"
+      t `tyFrom` "Unit -S [ 'x, 'y ] > Unit"
     it "parses a reference type" do
       RefTy (LtOf (Var "x") es) unitTy es `tyFrom` "&'x Unit"
     it "parses a polymorphic type" do

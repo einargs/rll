@@ -2,9 +2,7 @@
 module Rll.Ast where
 
 import Data.Text (Text)
-import qualified Data.HashMap.Strict as M
 import qualified Data.Text as T
-import Text.Megaparsec (Pos)
 import Data.Hashable (Hashable(..))
 import Prettyprinter
 
@@ -227,6 +225,8 @@ data Tm
   -- Cannot be synthesized.
   | FixTm SVar Tm Span
   | Anno Tm Ty Span
+  | IntLit Integer Span
+  | StringLit Text Span
   deriving (Show, Eq)
 
 instance Spans Tm where
@@ -245,4 +245,6 @@ instance Spans Tm where
     AppTm _ _ s -> s
     FixTm _ _ s -> s
     Anno _ _ s -> s
+    IntLit _ s -> s
+    StringLit _ s -> s
 

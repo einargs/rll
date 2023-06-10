@@ -66,7 +66,7 @@ library
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
-  ghc-options: -Wincomplete-patterns
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
@@ -121,7 +121,7 @@ executable rll-exe
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
-  ghc-options: -Wincomplete-patterns -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
@@ -182,7 +182,7 @@ test-suite rll-test
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
-  ghc-options: -Wincomplete-patterns -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2

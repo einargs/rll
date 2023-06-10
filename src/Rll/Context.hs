@@ -5,7 +5,6 @@ module Rll.Context
 import Data.HashMap.Strict qualified as M
 import Data.Text (Text)
 import Data.List (foldl')
-import Data.Function (on)
 
 import Rll.Ast
 
@@ -29,7 +28,13 @@ data Ctx = Ctx
   } deriving (Eq, Show)
 
 emptyCtx :: Ctx
-emptyCtx = Ctx M.empty M.empty [] M.empty M.empty
+emptyCtx = Ctx M.empty M.empty [] M.empty dataTypes where
+  (#) :: Text -> [TypeParam] -> (Var, DataType)
+  txt # params = (Var txt, BuiltinType txt params)
+  dataTypes = M.fromList
+    [ "String" # []
+    , "I64" # []
+    ]
 
 -- | Check for equality only on the local term variables and types.
 localEq :: Ctx -> Ctx -> Bool
@@ -63,12 +68,8 @@ diffCtxTerms full = f <$> diffs where
   f :: M.HashMap Var (Int, Ty) -> [(Var,Int,Ty)]
   f = fmap (\(a,(b,c)) -> (a,b,c)) . M.toList
 
-
 data DataType
   = EnumType [TypeParam] (M.HashMap Text [Ty]) Span
   | StructType Text [TypeParam] [Ty] Span
+  | BuiltinType Text [TypeParam]
   deriving (Eq, Show)
-
-instance Spans DataType where
-  getSpan (EnumType _ _ s) = s
-  getSpan (StructType _ _ _ s) = s

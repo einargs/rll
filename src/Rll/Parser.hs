@@ -3,19 +3,17 @@ module Rll.Parser (
   Parser, decl, fileDecls, tm, ty, RllParseError(..),
 ) where
 
-import Data.Void (Void)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Text.Megaparsec
-
 import qualified Text.Megaparsec.Char as C
 import qualified Text.Megaparsec.Char.Lexer as L
 import Data.Functor (($>))
 import Control.Monad (void)
-import Text.Megaparsec.Debug
-import qualified Data.Map as M
 import Data.List (foldl')
+import Data.Maybe (isJust)
 import Data.Char qualified as Char
+-- import Text.Megaparsec.Debug
 
 import Rll.Ast
 
@@ -255,9 +253,21 @@ tm = fullTm
       termTy <- ty
       pure $ Anno term termTy $ term `spanFromTo` termTy
     subTm = choice [tmVar, paren, caseTm, letStruct, letVar,
-             tmCon, copy, refTm, drop,
+             tmCon, copy, refTm, drop, intLit, stringLit,
              fixTm, funTm, poly]
     paren = label "term parentheses" $ lexeme $ C.char '(' *> space *> tm <* C.char ')'
+    intLit = label "integer literal" $ lexeme $ try do
+      s1 <- getSourcePos
+      isNeg <- isJust <$> optional (C.char '-')
+      i <- L.decimal
+      s2 <- getSourcePos
+      pure $ IntLit (if isNeg then negate i else i) $ spanBetween s1 s2
+    stringLit = label "string literal" $ lexeme do
+      s1 <- getSourcePos
+      C.char '"'
+      str <- manyTill L.charLiteral (C.char '"')
+      s2 <- getSourcePos
+      pure $ StringLit (T.pack str) $ spanBetween s1 s2
     caseBranch = label "case branch" do
       barw
       con <- upperSVar

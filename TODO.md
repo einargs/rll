@@ -1,8 +1,8 @@
 # Current
 - [X] Pretty printer for types
 - [X] I need to implement an anti-rank-2 check.
-- [ ] Implement built in integers and integer parsing.
-- [ ] Implement built in strings and string parsing.
+- [X] Implement built in integers and integer parsing.
+- [X] Implement built in strings and string parsing.
 - [ ] Elaborated syntax with full type annotations.
   - Is it generated in another pass or as part of type checking? I think
     as part of type checking.
@@ -23,7 +23,7 @@
 - [ ] Write out a compile monad for turning Elab into LLVM.
 - [ ] Transform RLL structures into LLVM structures.
 - [ ] Transform RLL enums into LLVM structures.
-- [ ] Start compiling 
+- [ ] Start compiling functions.
 
 ## Figure out
 - [ ] How to do tagged unions.
@@ -80,6 +80,9 @@ These are eventual things to do for polishing.
 - [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
 - [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
   and allow for better error messages.
+- [ ] Add tests for parsing character escape sequences, though since that's done by megaparsec that
+  might not be needed.
+- [ ] Add a `BuiltinType` to `DataType` for `String` and `I64`.
 
 ## Better Errors
 - [ ] Eventually every error should have a test to make sure it triggers correctly.
@@ -88,9 +91,9 @@ These are eventual things to do for polishing.
 
 ## Reorganize Code
 - [ ] Split TypeCheckSpec into multiple files.
-- [ ] Move the type variable renaming stuff from `Tc.hs` into it's own file.
-- [ ] Maybe move the `LtSet` stuff to their own file? That would let me move adjusting lts
-  as well as `useVar`, `dropVar`, `useRef`, `incRef`, etc.
+- [ ] Factor stuff out of `Tc.hs`.
+  - [ ] Move the type variable renaming stuff into it's own file.
+  - [ ] Maybe move the `LtSet` stuff to their own file?
 
 # Feature Thoughts
 Thoughts about various future features.
@@ -106,6 +109,9 @@ Thoughts about various future features.
   make the lifetime list optional if it's empty.
 - [ ] Can I add an ability to "move" a multi-use function into a closure so that I can use it
   without it being borrowed, but still have the closure type check as multi-use?
+- [ ] Operators.
+  - Very useful module that can build an expression parser given a table of operators.
+    https://hackage.haskell.org/package/parser-combinators-1.3.0/docs/Control-Monad-Combinators-Expr.html
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

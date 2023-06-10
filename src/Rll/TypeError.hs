@@ -8,14 +8,11 @@ import Data.Text.Lazy qualified as LT
 import Errata qualified as E
 import Errata.Styles qualified as S
 import Data.Vector.Unboxed qualified as V
-import Debug.Trace qualified as D
-import Data.HashMap.Strict qualified as M
 import Prettyprinter qualified as P
 import Prettyprinter ((<+>))
 import Prettyprinter.Render.Text qualified as PRT
 
 import Rll.Ast
-import Rll.Context
 
 data TyErr
   -- | This is an error we didn't think was possible.

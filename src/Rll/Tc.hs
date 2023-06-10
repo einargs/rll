@@ -5,6 +5,10 @@ module Rll.Tc
   , alterBorrowCount , addVar, deleteVar, withKind
   , kindOf, sanityCheckType
   , rawTypeSub, typeSub
+  , lifetimeVars, lifetimeSet
+  , ltSetToTypes, ltsForClosure, ltSetToVars
+  , incrementLts, decrementLts
+  , dropVar, useVar, useRef, incRef
   , rawIndexTyVars, indexTyVars, indexTyVarsInTm
   ) where
 
@@ -12,23 +16,16 @@ import Rll.Ast
 import Rll.Context
 import Rll.TypeError
 
-import Control.Monad (unless, when, forM_, void, forM)
-import Data.Text (Text, pack, unpack)
-import qualified Data.IntMap as IM
-import qualified Data.IntSet as IS
+import Control.Monad (unless, when, forM_, forM)
+import Data.Text (Text)
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
-import qualified Data.Set as TS
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Control.Arrow (first, second)
-import Data.Functor (($>))
-import qualified Data.List as L
-import qualified Debug.Trace as T
-import Data.List (find, foldl')
+import Data.List (foldl')
 import Safe (atMay)
 import Data.Maybe (mapMaybe)
-import Data.Foldable (foldlM)
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -85,6 +82,7 @@ kindOf ty = case ty of
   TyVar tv s -> lookupKind tv s
   TyCon name s -> lookupDataType name s >>= \case
     StructType _ tyParams _ _ -> pure $ kindFrom tyParams
+    BuiltinType _ tyParams -> pure $ kindFrom tyParams
     EnumType tyParams _ _ -> pure $ kindFrom tyParams
   LtOf v s -> lookupEntry v s *> pure LtKind
   FunTy _ aTy lts bTy _ -> do
@@ -146,12 +144,14 @@ sanityCheckType ty = do
 addDataType :: Var -> DataType -> Tc ()
 addDataType tyName dt = do
   ctx <- get
+  (terms, s) <- case dt of
+    EnumType tyArgs caseM s -> pure $ (f s tyArgs <$> M.toList caseM, s)
+    StructType v tyArgs args s -> pure $ ([f s tyArgs (v,args)], s)
+    BuiltinType _ _ -> throwError $
+      CompilerLogicError "Cannot add a built-in type to the context" Nothing
   case M.lookup tyName ctx.dataTypes of
     Just _ -> throwError $ DataTypeAlreadyExists tyName s
     Nothing -> pure ()
-  let terms = case dt of
-        EnumType tyArgs caseM _ -> f tyArgs <$> M.toList caseM
-        StructType v tyArgs args _ -> [f tyArgs (v,args)]
   terms' <- forM terms \(v,ty) -> (v,) <$> indexTyVars ty
   forM_ terms' \(v,ty) -> case M.lookup v ctx.moduleTerms of
     Just _ -> throwError $ DefAlreadyExists v s
@@ -161,19 +161,18 @@ addDataType tyName dt = do
     , dataTypes = M.insert tyName dt ctx.dataTypes
     }
   where
-    s = getSpan dt
-    f :: [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
-    f tyArgs (name, args) = (Var name, result) where
+    f :: Span -> [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
+    f s tyArgs (name, args) = (Var name, result) where
       finalTy = foldl' g (TyCon tyName s) $ zip tyArgs [0..] where
         g base (TypeParam{name},i) = TyApp base (TyVar (MkTyVar name i) s) s
-      result = buildArgs tyArgs $ buildTy finalTy $ reverse args
-    buildArgs :: [TypeParam] -> Ty -> Ty
-    buildArgs tyArgs body = foldr f body tyArgs where
+      result = buildArgs s tyArgs $ buildTy s finalTy $ reverse args
+    buildArgs :: Span -> [TypeParam] -> Ty -> Ty
+    buildArgs s tyArgs body = foldr f body tyArgs where
       f (TypeParam{name, kind}) body = Univ Many (LtJoin [] s) (TyVarBinding name) kind body s
-    buildTy :: Ty -> [Ty] -> Ty
-    buildTy ty [] = ty
-    buildTy result [input] = FunTy Many input (LtJoin [] s) result s
-    buildTy result (input:args) = buildTy fTy args
+    buildTy :: Span -> Ty -> [Ty] -> Ty
+    buildTy s ty [] = ty
+    buildTy s result [input] = FunTy Many input (LtJoin [] s) result s
+    buildTy s result (input:args) = buildTy s fTy args
       where fTy = FunTy Single input (LtJoin [] s) result s
 
 -- NOTE: abstract out the "insert if it doesn't already exist" pattern.
@@ -226,6 +225,178 @@ withKind k m = do
   put $ ctx2{termVars=unshiftedTermVars, localTypeVars=tvList}
   pure val
   where shiftTermTypes i = M.map (second $ rawTypeShift i 0)
+
+-- | Get a list of explicitly mentioned variables in the lifetime.
+-- Ignores lifetime variables.
+lifetimeVars :: Ty -> Tc [Var]
+lifetimeVars = fmap ltSetToVars . lifetimeSet
+
+-- | A lifetime type reduced down to its essence.
+type LtSet = S.HashSet (Span, Either TyVar Var)
+
+-- | Convenience function for getting a list of variables from a lifetime set
+ltSetToVars :: LtSet -> [Var]
+ltSetToVars = mapMaybe f . fmap snd . S.toList where
+  f (Right v) = Just v
+  f _ = Nothing
+
+-- | Convert a lifetime set to a list of the lifetimes.
+ltSetToTypes :: LtSet -> [Ty]
+ltSetToTypes ltSet = fmap f $ S.toList ltSet where
+  f (s, Left x) = TyVar x s
+  f (s, Right v) = LtOf v s
+
+-- | Get a set of all unique variables and lifetime variables mentioned in
+-- the lifetime. This is the most granular set of lifetimes.
+lifetimeSet :: Ty -> Tc LtSet
+lifetimeSet (LtOf v s) = pure $ S.singleton $ (s, Right v)
+lifetimeSet (LtJoin ls s) = S.unions <$> traverse lifetimeSet ls
+lifetimeSet ty@(TyVar x s) = do
+  k <- lookupKind x s
+  case k of
+    LtKind -> pure $ S.singleton $ (s, Left x)
+    _ -> throwError $ ExpectedKind LtKind k s
+lifetimeSet ty = throwError $ ExpectedKind LtKind TyKind $ getSpan ty
+
+-- | Get a set of all lifetimes mentioned in a type relative to the context.
+--
+-- It's important that the context type variable indices line up with those
+-- in the type.
+ltsInTy :: Ctx -> Ty -> LtSet
+ltsInTy ctx typ = S.fromList $ f typ [] where
+  f ty l = case ty of
+    LtOf v s -> (s, Right v ):l
+    TyVar tv s -> case getKind tv of
+      LtKind -> (s, Left tv ):l
+      TyKind -> l
+      TyOpKind _ _ -> l
+    RefTy t1 t2 _ -> f t1 $ f t2 l
+    LtJoin tys _ -> foldl' (flip f) l tys
+    FunTy _ t1 t2 t3 _ -> f t2 l
+    Univ _ t1 _ _ t2 _ -> f t1 l
+    _ -> l
+  getKind (MkTyVar _ i) = case atMay ctx.localTypeVars i of
+    Just k -> k
+    Nothing -> error "Should have been caught already"
+
+-- | Get all lifetimes implied by borrows and copies inside a closure.
+--
+-- Context is the closure entrance context. Used to make sure
+-- we only return lifetimes external to the closure.
+ltsBorrowedIn :: Ctx -> Tm -> LtSet
+ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
+  -- | `i` is the threshold counter used for telling which type variable is local.
+  g i tm l = case tm of
+    Case arg branches _ -> f arg $ foldl' (\l' (CaseBranch _ _ body) -> f body l') l branches
+    LetStruct _ _ t1 t2 _ -> f t2 $ f t1 l
+    Let _ t1 t2 _ -> f t2 $ f t1 l
+    FunTm _ _ t1 _ -> f t1 l
+    Poly _ t1 _ -> g (i+1) t1 l
+    TmVar _ _ -> l
+    TmCon _ _ -> l
+    IntLit _ _ -> l
+    StringLit _ _ -> l
+    Copy v s -> case M.lookup v ctx.termVars of
+      Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> (s, Right v ):l
+      Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> (s, Left x ):l
+      _ -> l
+    RefTm v s -> if M.member v ctx.termVars then (s, Right v ):l else l
+    AppTy t1 _ _ -> f t1 l
+    Drop _ t1 _ -> f t1 l
+    AppTm t1 t2 _ -> f t2 $ f t1 l
+    FixTm _ t1 _ -> f t1 l
+    Anno t1 _ _ -> f t1 l
+    where f = g i
+
+-- | Infer the lifetimes mentioned in the types of all consumed values.
+ltsInConsumed :: Ctx -> Ctx -> LtSet
+ltsInConsumed c1 c2 = S.unions ltSets where
+  diff = M.difference c1.termVars c2.termVars
+  ltSets = ltsInTy c1 . snd <$> M.elems diff
+
+-- | Infer the lifetimes for a closure type.
+ltsForClosure :: Ctx -> Ctx -> Tm -> LtSet
+ltsForClosure c1 c2 tm = S.union (ltsInConsumed c1 c2) $ ltsBorrowedIn c1 tm
+
+-- | Modify the borrow count for the variables in the mentioned lifetime variables.
+adjustLts :: (Int -> Int) -> Ty -> Tc ()
+adjustLts f lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount f)
+
+decrementLts :: Ty -> Tc ()
+decrementLts = adjustLts $ subtract 1
+
+incrementLts :: Ty -> Tc ()
+incrementLts = adjustLts (+1)
+
+-- | Does the type use the lifetime of this variable?
+isTyBorrowing :: Var -> Ty -> Bool
+isTyBorrowing v1 ty = case ty of
+  LtOf v _ -> v == v1
+  RefTy t1 t2 _ -> f t1 || f t2
+  LtJoin tys _ -> any f tys
+  FunTy _ t1 t2 t3 _ -> f t1 || f t2 || f t3
+  Univ _ t1 _ _ t2 _ -> f t1 || f t2
+  _ -> False
+  where f = isTyBorrowing v1
+
+-- | Get a list of all variables that reference the argument
+-- in their type.
+variablesBorrowing :: Var -> Tc [Var]
+variablesBorrowing v = do
+  tv <- gets (.termVars)
+  let f (_, (bc, ty)) = isTyBorrowing v ty
+      vars = fmap fst $ filter f $ M.toList tv
+  pure $ vars
+
+-- | Drop the variable.
+dropVar :: Var -> Span -> Tc ()
+dropVar v s = do
+  (borrowCount, ty) <- lookupEntry v s
+  unless (borrowCount == 0) $ do
+    borrowers <- variablesBorrowing v
+    throwError $ CannotDropBorrowedVar v borrowers s
+  case ty of
+    RefTy l _ _ -> decrementLts l
+    Univ Many l _ _ _ _ -> decrementLts l
+    FunTy Many _ l _ _ -> decrementLts l
+    _ -> throwError $ CannotDropTy ty s
+  deleteVar v s
+
+-- | This is used to "use" a term var. If it cannot find a term
+-- var in termVars to consume, it looks in moduleTerms.
+useVar :: Var -> Span -> Tc Ty
+useVar v s = do
+  ctx <- get
+  case M.lookup v ctx.termVars of
+    Just (borrowCount, ty) -> do
+      when (borrowCount < 0) $ throwError $ CompilerLogicError "subzero borrow count" (Just s)
+      unless (borrowCount == 0) $ do
+        borrowers <- variablesBorrowing v
+        throwError $ CannotUseBorrowedVar v borrowers s
+      deleteVar v s
+      pure ty
+    Nothing -> case M.lookup v ctx.moduleTerms of
+      Just ty -> pure ty
+      Nothing -> expectedTermVar v s
+
+-- | Utility function for decrementing the borrow count of the referenced variable
+-- when we consume a reference term.
+useRef :: Ty -> Tc ()
+useRef ty = do
+  case ty of
+    RefTy l _ _ -> decrementLts l
+    -- NOTE: figure out why this doesn't need to decrement function lts borrows and
+    -- write a test.
+    -- OLD: This should be decrementing function borrows right?
+    _ -> pure ()
+
+-- | Used to increment borrow counts if the return of a function increments them.
+incRef :: Ty -> Tc ()
+incRef ty = case ty of
+  RefTy l _ _ -> incrementLts l
+  FunTy _ _ lts _ _ -> incrementLts lts
+  Univ _ lts _ _ _ _ -> incrementLts lts
+  _ -> pure ()
 
 rawTypeShift :: Int -> Int -> Ty -> Ty
 rawTypeShift i c ty = case ty of
@@ -343,6 +514,10 @@ indexTyVarsInTm = g 0 M.empty where
       t1' <- f t1
       ty' <- rawIndexTyVars i idxMap ty
       pure $ Anno t1' ty' s
-    -- TmVar, TmCon, Copy, RefTm
-    _ -> pure term
+    TmVar _ _ -> pure term
+    TmCon _ _ -> pure term
+    Copy _ _ -> pure term
+    RefTm _ _ -> pure term
+    IntLit _ _ -> pure term
+    StringLit _ _ -> pure term
     where f = g i idxMap
