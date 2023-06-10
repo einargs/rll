@@ -1,5 +1,37 @@
 # Current
-- [ ] I need to implement an anti-rank-2 check.
+- [X] Pretty printer for types
+- [X] I need to implement an anti-rank-2 check.
+- [ ] Implement built in integers and integer parsing.
+- [ ] Implement built in strings and string parsing.
+- [ ] Elaborated syntax with full type annotations.
+  - Is it generated in another pass or as part of type checking? I think
+    as part of type checking.
+- [ ] Write a pass to specialize function code.
+  - We keep track of how a function has been applied inside a local context
+    for that pass.
+  - [ ] I'll need a unique way to identify the specialized functions so they
+    can be looked up.
+  - Do we specialize functions as part of Elab? I'm thinking that I'll key the
+    Elab structure to a DataKinds `Stage` type argument so I can remove polymorphism
+    and such from the specialized stage? Or maybe I should do a different tree then.
+    Or maybe I should specialize while generating Elab, and generate Elab in it's own
+    pass that also calls type checking? No. Elaboration is type checking.
+  - I think that I'll have a fully typed stage, and then I'll have a specialized tree
+    that simplifies functions etc.
+- [ ] Install LLVM.
+- [ ] Get a micro-example of a module compiling with some literal llvm code.
+- [ ] Write out a compile monad for turning Elab into LLVM.
+- [ ] Transform RLL structures into LLVM structures.
+- [ ] Transform RLL enums into LLVM structures.
+- [ ] Start compiling 
+
+## Figure out
+- [ ] How to do tagged unions.
+  - It looks like I'll need to directly get the size of the member structs
+    and then find the largest. There seems to be a `getTypeAllocSize` FFI I
+    might be able to call.
+  - Maybe look at how Dex does this? See Google Keep notes.
+- [ ] How to call a print in llvm.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -7,8 +39,12 @@ I'm thinking that I'll have a fully annotated IR that stuff gets translated to a
 So closures will have a list of what they need to be able to hold -- both references and moved/consumed
 values.
 
-- [ ] I need to change how I handle Univ and Poly.
+## Eventually
 - [ ] Allow rank 2 types when they're the same representation (i.e. variables inside boxes).
+- [ ] Look at existing LLVM infrastructure for converting moves and such into mutations.
+  - [ ] Read through the annotations you can add to see what I can tell LLVM.
+  - [ ] Run various LLVM optimization passes to see what they can do.
+  - [ ] Try the passes on larger examples.
 
 # Eventual Polish
 These are eventual things to do for polishing.
@@ -44,11 +80,17 @@ These are eventual things to do for polishing.
 - [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
 - [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
   and allow for better error messages.
-- [ ] Eventually every error should have a test to make sure it triggers correctly.
 
 ## Better Errors
-- [ ] Improve the context join error to highlight the areas that conflict and label them directly
+- [ ] Eventually every error should have a test to make sure it triggers correctly.
+- [X] Improve the context join error to highlight the areas that conflict and label them directly
   with the conflicting variables.
+
+## Reorganize Code
+- [ ] Split TypeCheckSpec into multiple files.
+- [ ] Move the type variable renaming stuff from `Tc.hs` into it's own file.
+- [ ] Maybe move the `LtSet` stuff to their own file? That would let me move adjusting lts
+  as well as `useVar`, `dropVar`, `useRef`, `incRef`, etc.
 
 # Feature Thoughts
 Thoughts about various future features.

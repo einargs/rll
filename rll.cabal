@@ -29,6 +29,7 @@ library
       Rll.Ast
       Rll.Context
       Rll.Parser
+      Rll.Tc
       Rll.TypeCheck
       Rll.TypeError
   other-modules:

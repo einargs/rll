@@ -3,7 +3,7 @@ module Rll.TypeCheckSpecUtil
   ( txt, stdFile, synthTo, checkTo, rawTest, baseTest
   , baseFailTest, baseCtx
   -- Utility constructors
-  , es, tyCon, refTy
+  , es, tyCon, refTy, tyVar, staticLt
   ) where
 
 import Test.Hspec
@@ -16,12 +16,15 @@ import Rll.TypeCheck
 import Rll.Ast
 import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
+import Rll.Tc
 
 es :: Span
 es = Span "test.rll" 1 1 1 1
 
 tyCon v = TyCon (Var v) es
 refTy v ty = RefTy (LtOf (Var v) es) ty es
+tyVar v i = TyVar (MkTyVar v i) es
+staticLt = LtJoin [] es
 
 processFile :: String -> T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
 processFile filename text = mapM_ processDecl <$> M.parse RP.fileDecls filename text

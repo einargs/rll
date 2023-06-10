@@ -1,16 +1,16 @@
 {-# LANGUAGE BlockArguments, OverloadedStrings, QuasiQuotes #-}
 module Rll.TypeCheckSpec where
 
-import Test.Hspec
-import qualified Data.Text as T
-import qualified Text.Megaparsec as M
-
-import Rll.TypeCheckSpecUtil
 import Rll.TypeCheck
 import Rll.Ast
 import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
 
+import Test.Hspec
+import qualified Data.Text as T
+import qualified Text.Megaparsec as M
+
+import Rll.TypeCheckSpecUtil
 
 spec :: Spec
 spec = parallel do
@@ -774,7 +774,7 @@ spec = parallel do
         |]
 
     it "can catch mismatched contexts" do
-      let diffs = [[(Var "i",0,tyCon "Int")],[]]
+      let diffs = [[(Var "i", 0, tyCon "Int")], []]
           diffs' = (es,) <$> diffs
       baseFailTest (CannotJoinCtxs diffs' es) [txt|
         test : Unit
@@ -782,6 +782,17 @@ spec = parallel do
         | Left i -> Unit
         | Right s -> let Str = s in Unit
         in Unit;
+        |]
+
+    it "can catch a rank 2 type" do
+      let univTy = Univ Many staticLt (TyVarBinding "x") TyKind funTy es
+          x = tyVar "x" 0
+          funTy =FunTy Many x staticLt x es
+
+      baseFailTest (NoRank2 univTy) [txt|
+        test : forall M [] l : Lifetime.
+          &l (forall M [] x : Type. x -M[]> x) -M[]> Unit
+        = ^ \r -> drop r in Unit;
         |]
 
 

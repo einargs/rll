@@ -169,6 +169,8 @@ data TyErr
   --
   -- actual kind, location of type with that kind
   | IsNotTyOp Kind Span
+  -- | This Univ type creates a rank 2 type.
+  | NoRank2 Ty
   deriving (Eq, Show)
 
 tpretty :: P.Pretty a => a -> Text
@@ -359,6 +361,9 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
     UnknownDataType name s -> spanMsg s $ ptext $ "Unknown data type" <+> P.pretty name
 
     UnknownTypeVar name s -> spanMsg s $ ptext $ "Unknown type variable" <+> P.pretty name
+
+    NoRank2 ty -> spanMsg (getSpan ty)
+      "This polymorphic type creates a rank 2 type that can't be specialized."
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]
