@@ -6,8 +6,8 @@
 - [X] Elaborated syntax with full type annotations.
   - Is it generated in another pass or as part of type checking? I think
     as part of type checking.
-- [ ] Write a test tool for it that type checks a function and then converts
-  the generated `Core` back to `Tm` and compares.
+  - [X] Write the tests so that the type check tests automatically compare the
+    `Core` to `Tm`.
 - [ ] Write a pass to specialize function code.
   - We keep track of how a function has been applied inside a local context
     for that pass.
@@ -58,6 +58,17 @@ When we implement traits, I think that Spec will be where we elaborate all of th
   - [ ] Read through the annotations you can add to see what I can tell LLVM.
   - [ ] Run various LLVM optimization passes to see what they can do.
   - [ ] Try the passes on larger examples.
+
+# Future Tests
+Future tests.
+
+- [ ] Enums with 2+ values in a branch.
+- [ ] Mixing no value and associated value cases in an enum.
+- [ ] 3+ branches for a case statement.
+- [ ] it will throw an error if a data type has a member with a kind that isn't Type
+- [ ] will throw an error if we use a function out of order.
+  - Eventually I want mutual recursion and pre-declaration, but this *should* be current
+    behavior so nail it down.
 
 # Eventual Polish
 These are eventual things to do for polishing.
