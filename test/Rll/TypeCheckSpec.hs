@@ -6,7 +6,7 @@ import Rll.TypeError (TyErr(..))
 
 import Test.Hspec
 
-import Rll.TypeCheckSpecUtil
+import Rll.TcSpecUtil
 
 spec :: Spec
 spec = parallel do
@@ -802,6 +802,10 @@ spec = parallel do
         s1 : String = "hello ";
         s2 : String = "Everyone";
         |]
+
+    -- TODO: it will throw an error if a data type has a member with a kind that isn't Type
+
+    -- TODO: will throw an error if we use a function out of order.
 
 
 

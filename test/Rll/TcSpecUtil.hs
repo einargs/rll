@@ -1,5 +1,5 @@
 {-# LANGUAGE BlockArguments, OverloadedStrings, QuasiQuotes #-}
-module Rll.TypeCheckSpecUtil
+module Rll.TcSpecUtil
   ( txt, stdFile, synthTo, checkTo, rawTest, baseTest
   , baseFailTest, baseCtx
   -- Utility constructors
@@ -9,6 +9,7 @@ module Rll.TypeCheckSpecUtil
 import Test.Hspec
 import qualified Data.Text as T
 import qualified Text.Megaparsec as M
+import Control.Monad (void)
 
 import QuoteTxt
 import qualified Rll.Parser as RP
@@ -27,7 +28,7 @@ tyVar v i = TyVar (MkTyVar v i) es
 staticLt = LtJoin [] es
 
 processFile :: String -> T.Text -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
-processFile filename text = mapM_ processDecl <$> M.parse RP.fileDecls filename text
+processFile filename text = (void . typeCheckFile) <$> M.parse RP.fileDecls filename text
 
 stdFile :: T.Text
 stdFile = [txt|
@@ -96,7 +97,7 @@ checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
 mkTest :: HasCallStack => Ctx -> T.Text -> Expectation
 mkTest ctx txt = case processFile "test.rll" txt of
   Left err -> expectationFailure $ M.errorBundlePretty err
-  Right tc -> case evalTc ctx tc of
+  Right tc -> case runTc ctx tc of
     Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
     Right _ -> pure ()
 

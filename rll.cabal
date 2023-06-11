@@ -28,6 +28,7 @@ library
       Lib
       Rll.Ast
       Rll.Context
+      Rll.Core
       Rll.Parser
       Rll.Tc
       Rll.TypeCheck
@@ -77,6 +78,7 @@ library
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1
+    , recursion-schemes >=5.2.2
     , safe >=0.3
     , template-haskell >=2.2
     , text >=1.2
@@ -132,6 +134,7 @@ executable rll-exe
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1
+    , recursion-schemes >=5.2.2
     , rll
     , safe >=0.3
     , template-haskell >=2.2
@@ -147,8 +150,8 @@ test-suite rll-test
   other-modules:
       QuoteTxt
       Rll.ParserSpec
+      Rll.TcSpecUtil
       Rll.TypeCheckSpec
-      Rll.TypeCheckSpecUtil
       Paths_rll
   hs-source-dirs:
       test
@@ -193,6 +196,7 @@ test-suite rll-test
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1
+    , recursion-schemes >=5.2.2
     , rll
     , safe >=0.3
     , template-haskell >=2.2

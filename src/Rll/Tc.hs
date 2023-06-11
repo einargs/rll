@@ -160,6 +160,7 @@ addDataType tyName dt = do
     { moduleTerms = foldl' (flip $ uncurry M.insert) ctx.moduleTerms terms'
     , dataTypes = M.insert tyName dt ctx.dataTypes
     }
+  forM_ terms' $ sanityCheckType . snd
   where
     f :: Span -> [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
     f s tyArgs (name, args) = (Var name, result) where
@@ -200,6 +201,7 @@ addVar v s ty = do
         Just (def,_) -> pure def
       throwError $ VarAlreadyInScope v s def
     Nothing -> do
+      -- NOTE: this may be redundant
       sanityCheckType ty
       put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
                ,varLocs=M.insert v (s,Nothing) ctx.varLocs}

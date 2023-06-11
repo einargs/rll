@@ -5,14 +5,15 @@ import Rll.Ast
 import Rll.TypeError
 import Rll.Context
 import Rll.Tc
+import Rll.Core
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
 import qualified Data.HashMap.Strict as M
 import Control.Monad.State (MonadState(..), gets)
 import Control.Monad.Except (MonadError(..))
-import qualified Debug.Trace as T
-import Data.List (find)
+import Data.List (find, unzip4)
+import Data.Foldable (foldlM)
 
 -- | Use this to construct the type of a reference type.
 createVarRef :: Var -> Span -> Tc Ty
@@ -39,18 +40,11 @@ verifyCtxSubset s m = do
     in throwError $ VarsEscapingScope vars s
   pure v
 
-data TcMethod a where
-  Check :: TcMethod ()
-  Synth :: TcMethod Ty
+data TcMethod = Check Ty | Synth
 
-class Eq a => TcMethodResult a where
-  getTcMethod :: TcMethod a
-
-instance TcMethodResult Ty where
-  getTcMethod = Synth
-
-instance TcMethodResult () where
-  getTcMethod = Check
+useTcMethod :: TcMethod -> Tm -> Tc Core
+useTcMethod (Check ty) = check ty
+useTcMethod Synth = synth
 
 -- | Join type checking actions on multiple branches of a case statement.
 --
@@ -58,28 +52,29 @@ instance TcMethodResult () where
 --
 -- The span is the span of the overall case statement. Each branch has a span for the
 -- body of that branch.
-joinBranches :: forall a. TcMethodResult a => Span -> [(Span, Tc a)] -> Tc a
-joinBranches s [] = throwError $ NoCaseBranches s
-joinBranches s [(_,b)] = b
-joinBranches s ((s1,b):bs) = do
+joinBranches :: TcMethod -> Span -> [Tc Core] -> Tc [Core]
+joinBranches _ s [] = throwError $ NoCaseBranches s
+joinBranches _ s [b] = pure <$> b
+joinBranches method s (b:bs) = do
   ctx <- get
-  ty1 <- b
+  core1@Core{ty=ty1, span=s1} <- b
   ctx1 <- get
-  let f (s,b) = do
+  let f b = do
         put ctx
-        bTy <- b
+        bCore <- b
+        let s = getSpan bCore
         ctx' <- get
-        pure $ ((s,bTy),s,ctx')
-  (sTys,spans,ctxs) <- unzip3 <$> traverse f bs
+        pure $ ((s,bCore.ty),s,ctx',bCore)
+  (sTys,spans,ctxs, cores) <- unzip4 <$> traverse f bs
   unless (all (localEq ctx1) ctxs) $
     let ctxs' = diffCtxTerms $ ctx1:ctxs
         sCtxs = zip (s1:spans) ctxs'
     in throwError $ CannotJoinCtxs sCtxs s
-  case getTcMethod @a of
-    Check -> pure ()
+  case method of
+    Check _ -> pure cores
     Synth -> do
       unless (all ((ty1==) . snd) sTys) $ throwError $ CannotJoinTypes ((s1,ty1):sTys) s
-      pure ty1
+      pure cores
 
 toRef :: Span -> Ty -> Ty -> Ty
 toRef s lt ty@(RefTy _ _ _) = ty
@@ -125,24 +120,24 @@ getTyConArgs mkErr ty = do
       pure $ (name, t, ty2:args)
     getArgs t = mkErr t
 
-caseClause :: forall a. TcMethodResult a => Span -> Tm -> [CaseBranch] -> (Tm -> Tc a) -> Tc a
-caseClause caseSpan t1 branches method = do
-  t1Ty <- synth t1
-  case t1Ty of
+caseClause :: Span -> Tm -> [CaseBranch] -> TcMethod -> Tc Core
+caseClause caseSpan t1 branches tcMethod = do
+  t1Core@Core{ty=t1Ty} <- synth t1
+  cores <- case t1Ty of
     RefTy lt enumTy _ -> do
       useRef t1Ty
       (tyName,conMap) <- ensureEnum enumTy
       let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
-      joinBranches caseSpan $ buildHandler f tyName conMap <$> branches
+      joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
     _ -> do
       (tyName,conMap) <- ensureEnum t1Ty
       let f sv ty = addVar sv.var sv.span ty
-      joinBranches caseSpan $ buildHandler f tyName conMap <$> branches
+      joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
+  let f (CaseBranch con members _) core = (con, members, core)
+      coreBranches = zipWith f branches cores
+  pure $ Core (head cores).ty caseSpan $ CaseCF t1Core coreBranches
   where
-    -- | Just here to extract the span and package it nicely alongside the handleBranch result.
-    buildHandler :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> (Span, Tc a)
-    buildHandler addMember tyName conMap cb@(CaseBranch _ _ body) =
-      (getSpan body, handleBranch addMember tyName conMap cb)
+    method = useTcMethod tcMethod
     ensureEnum :: Ty -> Tc (Var, M.HashMap Text [Ty])
     ensureEnum enumTy = do
       (tyName, conMap) <- getEnumCaseMap enumTy
@@ -167,7 +162,7 @@ caseClause caseSpan t1 branches method = do
         EnumType tyParams conMap _ -> do
           pure $ (tyName, M.map (applyTypeParams args tyParams) conMap)
         _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
-    handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> Tc a
+    handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch -> Tc Core
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
       case M.lookup conVar.var.name conMap of
         Nothing -> throwError $ UnknownEnumCase tyName conVar
@@ -192,19 +187,20 @@ getStructMembers ty termSpan = do
       pure $ (structCon', name, applyTypeParams args tyParams memberTys)
     _ -> throwError $ TypeIsNotStruct conTy termSpan
 
-letStructClause :: forall a. Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
+letStructClause :: Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letStructClause letSpan structCon memberVars t1 body method = do
-  t1Ty <- synth t1
-  case t1Ty of
+  t1Core@Core{ty=t1Ty} <- synth t1
+  bodyCore <- case t1Ty of
     RefTy lt structTy _ -> do
       useRef t1Ty
-      let f svar ty = T.trace (show svar.var <> ": " <> show ty) $ addPartialBorrowVar svar.var svar.span lt ty
+      let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
       handle f structTy
     _ -> do
       let f svar ty = addVar svar.var svar.span ty
       handle f t1Ty
+  pure $ Core bodyCore.ty letSpan $ LetStructCF structCon memberVars t1Core bodyCore
   where
-    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Tc a
+    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Tc Core
     handle addMember t1Ty = do
       (structCon', tyName, memberTys) <- getStructMembers t1Ty $ getSpan t1
       unless (structCon.var.name == structCon') $ throwError $
@@ -215,11 +211,12 @@ letStructClause letSpan structCon memberVars t1 body method = do
       forM_ members $ uncurry addMember
       method body
 
-letClause :: Span -> Var -> Tm -> Tm -> (Tm -> Tc a) -> Tc a
+letClause :: Span -> SVar -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letClause s x t1 t2 f = do
-  xTy <- synth t1
-  addVar x s xTy
-  f t2
+  t1Core <- synth t1
+  addVar x.var s t1Core.ty
+  t2Core <- f t2
+  pure $ Core t2Core.ty s $ LetCF x t1Core t2Core
 
 -- | Given an entrance and exit context, we see which variables in the
 -- entrance are no longer in the exit context (and thus have been consumed).
@@ -262,18 +259,20 @@ mkClosureSynth s body m = do
   incrementLts lts
   pure $ (lts, mult, out)
 
-synthFun :: Span -> SVar -> Ty -> Tm -> Tc Ty
+synthFun :: Span -> SVar -> Ty -> Tm -> Tc Core
 synthFun s v vTy body = do
-  (lts, mult, bodyTy) <- mkClosureSynth s body do
+  (lts, mult, bodyCore) <- mkClosureSynth s body do
     addVar v.var v.span vTy
     synth body
-  pure $ FunTy mult vTy lts bodyTy s
+  let ty = FunTy mult vTy lts bodyCore.ty s
+  pure $ Core ty s $ LamCF v vTy bodyCore
 
-synthPoly :: Span -> TyVarBinding -> Kind -> Tm -> Tc Ty
+synthPoly :: Span -> TyVarBinding -> Kind -> Tm -> Tc Core
 synthPoly s b kind body = do
-  (lts, mult, bodyTy) <- mkClosureSynth s body $
+  (lts, mult, bodyCore) <- mkClosureSynth s body $
     withKind kind $ synth body
-  pure $ Univ mult lts b kind bodyTy s
+  let ty = Univ mult lts b kind bodyCore.ty s
+  pure $ Core ty s $ PolyCF b kind bodyCore
 
 -- | This is an additional check to catch compiler logic errors. It is
 -- not enough on it's own.
@@ -300,10 +299,10 @@ verifyBorrows s startCtx endCtx lts body = do
     inferredLtSet = ltsForClosure startCtx endCtx body
 
 -- | Helper for building closure checks.
-mkClosureCheck :: Span -> Tm -> Mult -> Ty -> Tc () -> Tc ()
+mkClosureCheck :: Span -> Tm -> Mult -> Ty -> Tc Core -> Tc Core
 mkClosureCheck s body mult lts m = do
   startCtx <- get
-  m
+  val <- m
   endCtx <- get
 
   -- Check specified lifetimes
@@ -314,16 +313,18 @@ mkClosureCheck s body mult lts m = do
 
   checkStableBorrowCounts s startCtx endCtx
 
-checkFun :: Span -> SVar -> Tm -> Mult -> Ty -> Ty -> Ty -> Tc ()
+  pure val
+
+checkFun :: Span -> SVar -> Tm -> Mult -> Ty -> Ty -> Ty -> Tc Core
 checkFun s v body mult aTy lts bTy = mkClosureCheck s body mult lts do
   addVar v.var v.span aTy
   check bTy body
 
-checkPoly :: Span -> TyVarBinding -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc ()
+checkPoly :: Span -> TyVarBinding -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc Core
 checkPoly s b kind body mult lts bodyTy = mkClosureCheck s body mult lts do
   withKind kind $ check bodyTy body
 
-checkFixTm :: Span -> Mult -> SVar -> Tm -> Ty -> Tc ()
+checkFixTm :: Span -> Mult -> SVar -> Tm -> Ty -> Tc Core
 checkFixTm s mult funVar body bodyTy = do
   when (mult == Single) $ throwError $ CannotFixSingle s $ getSpan bodyTy
   withKind LtKind do
@@ -332,84 +333,92 @@ checkFixTm s mult funVar body bodyTy = do
     let fLt = LtJoin [] funVar.span
         refTy = RefTy fLt bodyTy funVar.span
     addVar funVar.var funVar.span refTy
-    check bodyTy body
+    bodyCore <- check bodyTy body
     dropVar funVar.var funVar.span
+    pure bodyCore
 
-synth :: Tm -> Tc Ty
+synth :: Tm -> Tc Core
 synth tm = verifyCtxSubset (getSpan tm) $ case tm of
   Drop sv t s -> do
     dropVar sv.var sv.span
-    synth t
+    tCore <- synth t
+    pure $ Core tCore.ty s $ DropCF sv tCore
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 synth
-  TmCon v s -> lookupDataCon v s
+  TmCon v s -> do
+    ty <- lookupDataCon v s
+    pure $ Core ty s $ ConCF v
   Anno t ty _ -> do
     sanityCheckType ty
     check ty t
-    pure ty
-  TmVar v s -> useVar v s
+  TmVar v s -> do
+    ty <- useVar v s
+    pure $ Core ty s $ VarCF v
   Copy v s -> do
     vTy <- lookupVar v s
     case vTy of
       RefTy (LtOf v' _ ) _ _ -> do
         alterBorrowCount v' (+1)
-        pure vTy
-      RefTy _ _ _ -> pure vTy
+        pure $ Core vTy s $ CopyCF v
+      RefTy _ _ _ -> pure $ Core vTy s $ CopyCF v
       _ -> throwError $ CannotCopyNonRef vTy s
-  RefTm v s -> createVarRef v s
-  Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 synth
-  Case t1 branches s -> caseClause s t1 branches synth
+  RefTm v s -> do
+    ty <- createVarRef v s
+    pure $ Core ty s $ RefCF v
+  Let sv t1 t2 s -> letClause sv.span sv t1 t2 synth
+  Case t1 branches s -> caseClause s t1 branches Synth
   FunTm v (Just vTy) body s -> synthFun s v vTy body
   FunTm _ Nothing _ s -> throwError $ SynthRequiresAnno s
   Poly (Just (v,kind)) body s -> synthPoly s v kind body
   Poly Nothing _ s -> throwError $ SynthRequiresAnno s
   AppTy t1 tyArg s -> do
-    t1Ty <- synth t1
+    t1Core@Core{ty=t1Ty} <- synth t1
     case t1Ty of
       Univ _ lts v k body _ -> do
         k' <- kindOf tyArg
         unless (k == k') $ throwError $ ExpectedKind k k' $ getSpan tyArg
         decrementLts lts
         incRef body
-        pure $ typeSub tyArg body
+        pure $ Core (typeSub tyArg body) s $ AppTyCF t1Core tyArg
       RefTy l (Univ Many lts v k body _) _ -> do
         useRef t1Ty
         incRef body
-        pure $ typeSub tyArg body
+        pure $ Core (typeSub tyArg body) s $ AppTyCF t1Core tyArg
       _ -> throwError $ TyIsNotUniv t1Ty s
   AppTm t1 t2 s -> do
     -- Roughly we synthesize t1 and use that to check t2.
-    t1Ty <- synth t1
+    t1Core@Core{ty=t1Ty} <- synth t1
     case t1Ty of
       -- We allow consumption of both single and multi-use functions.
       FunTy _ aTy lts bTy _ -> do
         checkBorrowList lts s
-        check aTy t2
+        t2Core <- check aTy t2
         useRef aTy
         decrementLts lts
         incRef bTy
-        pure bTy
+        pure $ Core bTy s $ AppTmCF t1Core t2Core
       RefTy lt (FunTy Many aTy lts bTy _) _ -> do
         checkBorrowList lts s
-        check aTy t2
+        t2Core <- check aTy t2
         useRef aTy
         useRef t1Ty
         incRef bTy
-        pure bTy
+        pure $ Core bTy s $ AppTmCF t1Core t2Core
       _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
   FixTm _ _ s -> throwError $ CannotSynthFixTm s
-  StringLit _ s -> pure $ TyCon (Var "String") s
-  IntLit _ s -> pure $ TyCon (Var "I64") s
+  StringLit txt s -> pure $ Core (TyCon (Var "String") s) s $ StringLitCF txt
+  IntLit i s -> pure $ Core (TyCon (Var "I64") s) s $ IntLitCF i
 
-check :: Ty -> Tm -> Tc ()
+check :: Ty -> Tm -> Tc Core
 check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
-  Let sv t1 t2 s -> letClause sv.span sv.var t1 t2 $ check ty
-  Case t1 branches s -> caseClause s t1 branches $ check ty
+  Let sv t1 t2 s -> letClause sv.span sv t1 t2 $ check ty
+  Case t1 branches s -> caseClause s t1 branches $ Check ty
   LetStruct con vars t1 t2 s -> letStructClause s con vars t1 t2 $ check ty
   Drop sv t s -> do
     dropVar sv.var sv.span
-    check ty t
+    tCore <- check ty t
+    cf $ DropCF sv tCore
   FunTm v mbVTy body s ->
     case ty of
       FunTy m aTy lts bTy _ -> do
@@ -417,7 +426,8 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
         case mbVTy of
           Just vTy -> unless (vTy == aTy) $ throwError $ ExpectedType aTy vTy
           Nothing -> pure ()
-        checkFun s v body m aTy lts bTy
+        bodyCore <- checkFun s v body m aTy lts bTy
+        cf $ LamCF v aTy bodyCore
       _ -> throwError $ ExpectedFunType ty s
   Poly mbBind body s1 ->
     case ty of
@@ -427,10 +437,11 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
           -- NOTE I don't know if this should check text name.
           unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
           unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
-        checkPoly s1 b2 k2 body m lts bodyTy
+        bodyCore <- checkPoly s1 b2 k2 body m lts bodyTy
+        cf $ PolyCF b2 k2 bodyCore
       _ -> throwError $ ExpectedUnivType ty s1
-  FixTm funVar body s1 ->
-    case ty of
+  FixTm funVar body s1 -> do
+    bodyCore <- case ty of
       FunTy m xTy lts bodyTy s2 -> do
         checkBorrowList lts s1
         checkFixTm s1 m funVar body ty
@@ -438,30 +449,44 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
         checkBorrowList lts s1
         checkFixTm s1 m funVar body ty
       _ -> throwError $ ExpectedFixableType ty s1
+    cf $ FixCF funVar bodyCore
   _ -> do
-    ty' <- synth tm
+    tmCore@Core{ty=ty'} <- synth tm
     if ty == ty'
-      then pure ()
+      then pure tmCore
       else throwError $ ExpectedButInferred ty ty' $ getSpan tm
-
-processDecl :: Decl -> Tc ()
-processDecl decl = case decl of
-  FunDecl name ty body s -> do
-    ctx <- get
-    ty' <- indexTyVars ty
-    sanityCheckType ty'
-    body' <- indexTyVarsInTm body
-    check ty' body'
-    put ctx
-    addModuleFun s (Var name) ty'
-  StructDecl name tyParams args s -> do
-    indexedArgs <- indexArgs tyParams args
-    addDataType (Var name) $ StructType name tyParams indexedArgs s
-  EnumDecl tyName tyParams enumCons s -> do
-    enumCons' <- forM enumCons \(EnumCon x y) -> (x,) <$> indexArgs tyParams y
-    let caseM = M.fromList enumCons'
-    addDataType (Var tyName) $ EnumType tyParams caseM s
   where
-    indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
-    indexArgs tyParams tys = traverse f tys where
-      f = rawIndexTyVars (length tyParams - 1) $ M.fromList $ zip ((.name) <$> reverse tyParams) [0..]
+    cf = pure . Core ty (getSpan tm)
+
+-- TODO: write a helper function that will run the entire type check monad for this
+-- and give me a context with the data types and new functions.
+-- data CoreContext = CoreContext [DataType] [(Var, Core)]
+-- generateCore :: [Decl] -> CoreContext
+
+-- | Type checks all declarations in the file and generates the Core IR
+-- for all of the functions.
+typeCheckFile :: [Decl] -> Tc [(Var, Core)]
+typeCheckFile = fmap reverse . foldlM go [] where
+  go funcs decl = case decl of
+    FunDecl name ty body s -> do
+      ctx <- get
+      ty' <- indexTyVars ty
+      sanityCheckType ty'
+      body' <- indexTyVarsInTm body
+      core <- check ty' body'
+      put ctx
+      addModuleFun s (Var name) ty'
+      pure $ (Var name, core):funcs
+    StructDecl name tyParams args s -> do
+      indexedArgs <- indexArgs tyParams args
+      addDataType (Var name) $ StructType name tyParams indexedArgs s
+      pure funcs
+    EnumDecl tyName tyParams enumCons s -> do
+      enumCons' <- forM enumCons \(EnumCon x y) -> (x,) <$> indexArgs tyParams y
+      let caseM = M.fromList enumCons'
+      addDataType (Var tyName) $ EnumType tyParams caseM s
+      pure funcs
+    where
+      indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
+      indexArgs tyParams tys = traverse f tys where
+        f = rawIndexTyVars (length tyParams - 1) $ M.fromList $ zip ((.name) <$> reverse tyParams) [0..]

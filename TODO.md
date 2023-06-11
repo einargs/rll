@@ -3,9 +3,11 @@
 - [X] I need to implement an anti-rank-2 check.
 - [X] Implement built in integers and integer parsing.
 - [X] Implement built in strings and string parsing.
-- [ ] Elaborated syntax with full type annotations.
+- [X] Elaborated syntax with full type annotations.
   - Is it generated in another pass or as part of type checking? I think
     as part of type checking.
+- [ ] Write a test tool for it that type checks a function and then converts
+  the generated `Core` back to `Tm` and compares.
 - [ ] Write a pass to specialize function code.
   - We keep track of how a function has been applied inside a local context
     for that pass.
@@ -39,8 +41,19 @@ I'm thinking that I'll have a fully annotated IR that stuff gets translated to a
 So closures will have a list of what they need to be able to hold -- both references and moved/consumed
 values.
 
+## Stages
+- First we have the `Tm` stage, which I should probably go through and rename to like `SourceTm`.
+- Then we have a `Core` where every term is annotated with it's type.
+- Then we have a `Spec` where we specialize all the functions.
+  - Eventually this will still be able to have polymorphic functions as long as
+    the polymorphism is contained within references.
+  - This stage will also remove all lambdas.
+
+When we implement traits, I think that Spec will be where we elaborate all of the traits to stuff.
+
 ## Eventually
-- [ ] Allow rank 2 types when they're the same representation (i.e. variables inside boxes).
+- [ ] Allow rank 2 types when they're the same representation (i.e. variables inside boxes or references).
+  - I don't know how useful things like dynamic traits and rank 2 stuff will be.
 - [ ] Look at existing LLVM infrastructure for converting moves and such into mutations.
   - [ ] Read through the annotations you can add to see what I can tell LLVM.
   - [ ] Run various LLVM optimization passes to see what they can do.
@@ -82,7 +95,10 @@ These are eventual things to do for polishing.
   and allow for better error messages.
 - [ ] Add tests for parsing character escape sequences, though since that's done by megaparsec that
   might not be needed.
-- [ ] Add a `BuiltinType` to `DataType` for `String` and `I64`.
+- [X] Add a `BuiltinType` to `DataType` for `String` and `I64`.
+- [ ] I could do all of the `sanityCheckType` inside of `indexTyVarsInTm`. I think I'd have to change
+  `sanityCheckType` for it.
+- [ ] Allow mutually recursive functions and using a function before it's defined.
 
 ## Better Errors
 - [ ] Eventually every error should have a test to make sure it triggers correctly.
