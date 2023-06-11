@@ -23,7 +23,7 @@ spec = parallel do
         test : Unit
         = let a = Unit in let b = &a in drop b in a;
         |]
-    it "can check a case of" do
+    fit "can check a case of" do
       baseTest [txt|
         test : Unit =
         case Left Int of

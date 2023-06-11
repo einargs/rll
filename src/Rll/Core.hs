@@ -29,7 +29,10 @@ data CoreF a
 
 -- | This annotates everything in `CoreF` with its type and span.
 data Core = Core {ty::Ty, span::Span, core::(CoreF Core)}
-  deriving (Show, Eq)
+  deriving (Eq)
+
+instance Show Core where
+  showsPrec p (Core _ _ cf) = showsPrec p cf
 
 instance Spans Core where
   getSpan = (.span)

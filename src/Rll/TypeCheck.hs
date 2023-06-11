@@ -9,11 +9,12 @@ import Rll.Core
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
+import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
 import Control.Monad.State (MonadState(..), gets)
 import Control.Monad.Except (MonadError(..))
 import Data.List (find, unzip4)
-import Data.Foldable (foldlM)
+import Data.Maybe (catMaybes)
 
 -- | Use this to construct the type of a reference type.
 createVarRef :: Var -> Span -> Tc Ty
@@ -66,15 +67,16 @@ joinBranches method s (b:bs) = do
         ctx' <- get
         pure $ ((s,bCore.ty),s,ctx',bCore)
   (sTys,spans,ctxs, cores) <- unzip4 <$> traverse f bs
+  let cores' = core1:cores
   unless (all (localEq ctx1) ctxs) $
     let ctxs' = diffCtxTerms $ ctx1:ctxs
         sCtxs = zip (s1:spans) ctxs'
     in throwError $ CannotJoinCtxs sCtxs s
   case method of
-    Check _ -> pure cores
+    Check _ -> pure cores'
     Synth -> do
       unless (all ((ty1==) . snd) sTys) $ throwError $ CannotJoinTypes ((s1,ty1):sTys) s
-      pure cores
+      pure cores'
 
 toRef :: Span -> Ty -> Ty -> Ty
 toRef s lt ty@(RefTy _ _ _) = ty
@@ -133,6 +135,10 @@ caseClause caseSpan t1 branches tcMethod = do
       (tyName,conMap) <- ensureEnum t1Ty
       let f sv ty = addVar sv.var sv.span ty
       joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
+  unless (length cores == length branches) $ throwError $
+    CompilerLogicError ("cores length " <> T.pack (show (length cores)) <>
+                       " branches length " <> T.pack (show (length branches)))
+      (Just caseSpan)
   let f (CaseBranch con members _) core = (con, members, core)
       coreBranches = zipWith f branches cores
   pure $ Core (head cores).ty caseSpan $ CaseCF t1Core coreBranches
@@ -466,8 +472,8 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
 -- | Type checks all declarations in the file and generates the Core IR
 -- for all of the functions.
 typeCheckFile :: [Decl] -> Tc [(Var, Core)]
-typeCheckFile = fmap reverse . foldlM go [] where
-  go funcs decl = case decl of
+typeCheckFile = fmap catMaybes . mapM go where
+  go decl = case decl of
     FunDecl name ty body s -> do
       ctx <- get
       ty' <- indexTyVars ty
@@ -476,16 +482,16 @@ typeCheckFile = fmap reverse . foldlM go [] where
       core <- check ty' body'
       put ctx
       addModuleFun s (Var name) ty'
-      pure $ (Var name, core):funcs
+      pure $ Just (Var name, core)
     StructDecl name tyParams args s -> do
       indexedArgs <- indexArgs tyParams args
       addDataType (Var name) $ StructType name tyParams indexedArgs s
-      pure funcs
+      pure Nothing
     EnumDecl tyName tyParams enumCons s -> do
       enumCons' <- forM enumCons \(EnumCon x y) -> (x,) <$> indexArgs tyParams y
       let caseM = M.fromList enumCons'
       addDataType (Var tyName) $ EnumType tyParams caseM s
-      pure funcs
+      pure Nothing
     where
       indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
       indexArgs tyParams tys = traverse f tys where
