@@ -261,13 +261,13 @@ tm = fullTm
       isNeg <- isJust <$> optional (C.char '-')
       i <- L.decimal
       s2 <- getSourcePos
-      pure $ IntLit (if isNeg then negate i else i) $ spanBetween s1 s2
+      pure $ LiteralTm (IntLit (if isNeg then negate i else i)) $ spanBetween s1 s2
     stringLit = label "string literal" $ lexeme do
       s1 <- getSourcePos
       C.char '"'
       str <- manyTill L.charLiteral (C.char '"')
       s2 <- getSourcePos
-      pure $ StringLit (T.pack str) $ spanBetween s1 s2
+      pure $ LiteralTm (StringLit (T.pack str)) $ spanBetween s1 s2
     caseBranch = label "case branch" do
       barw
       con <- upperSVar

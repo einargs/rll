@@ -106,11 +106,12 @@ spec = parallel do
     it "parses type application" do
       Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"
     it "parses an integer literal" do
-      IntLit 51 es `tmFrom` "51"
-      IntLit (-47) es `tmFrom` "-47"
+      LiteralTm (IntLit 51) es `tmFrom` "51"
+      LiteralTm (IntLit (-47)) es `tmFrom` "-47"
       parseShouldError tm "- 13"
     it "parses a string literal" do
-      StringLit "hello darkness my old friend" es `tmFrom` [txt|"hello darkness my old friend"|]
+      let t = LiteralTm (StringLit "hello darkness my old friend") es
+      t `tmFrom` [txt|"hello darkness my old friend"|]
     it "throws an error for nonsense" do
       -- TODO: seems to badly infinite loop and grow and run everything out of resources?
       parseShouldError tm "!@#@! "

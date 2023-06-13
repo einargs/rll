@@ -30,6 +30,7 @@ library
       Rll.Context
       Rll.Core
       Rll.Parser
+      Rll.Spec
       Rll.Tc
       Rll.TypeCheck
       Rll.TypeError
@@ -67,6 +68,7 @@ library
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
+      DeriveTraversable
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports
   build-depends:
       base >=4.7 && <5
@@ -123,6 +125,7 @@ executable rll-exe
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
+      DeriveTraversable
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
@@ -185,6 +188,7 @@ test-suite rll-test
       DerivingVia
       ImportQualifiedPost
       OverloadedRecordDot
+      DeriveTraversable
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5

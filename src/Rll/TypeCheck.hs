@@ -27,6 +27,26 @@ createVarRef v s = do
   -- NOTE I'm pretty sure using this span makes sense, but check.
   pure $ RefTy (LtOf v s) t s
 
+-- | This is used to "use" a term var. If it cannot find a term
+-- var in termVars to consume, it looks in moduleTerms.
+--
+-- Returns the appropriate Core if it's a module variable or local
+-- to the function.
+useVar :: Var -> Span -> Tc Core
+useVar v s = do
+  ctx <- get
+  case M.lookup v ctx.termVars of
+    Just (borrowCount, ty) -> do
+      when (borrowCount < 0) $ throwError $ CompilerLogicError "subzero borrow count" (Just s)
+      unless (borrowCount == 0) $ do
+        borrowers <- variablesBorrowing v
+        throwError $ CannotUseBorrowedVar v borrowers s
+      deleteVar v s
+      pure $ Core ty s $ LocalVarCF v
+    Nothing -> case M.lookup v ctx.moduleTerms of
+      Just ty -> pure $ Core ty s $ ModuleVarCF v
+      Nothing -> expectedTermVar v s
+
 -- | Verify that no variables that should be handled inside a scope are escaping.
 --
 -- The span should be the span of the entire scope.
@@ -271,14 +291,14 @@ synthFun s v vTy body = do
     addVar v.var v.span vTy
     synth body
   let ty = FunTy mult vTy lts bodyCore.ty s
-  pure $ Core ty s $ LamCF v vTy bodyCore
+  pure $ Core ty s $ extendLam v vTy bodyCore
 
 synthPoly :: Span -> TyVarBinding -> Kind -> Tm -> Tc Core
 synthPoly s b kind body = do
   (lts, mult, bodyCore) <- mkClosureSynth s body $
     withKind kind $ synth body
   let ty = Univ mult lts b kind bodyCore.ty s
-  pure $ Core ty s $ PolyCF b kind bodyCore
+  pure $ Core ty s $ extendPoly b kind bodyCore
 
 -- | This is an additional check to catch compiler logic errors. It is
 -- not enough on it's own.
@@ -356,9 +376,7 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
   Anno t ty _ -> do
     sanityCheckType ty
     check ty t
-  TmVar v s -> do
-    ty <- useVar v s
-    pure $ Core ty s $ VarCF v
+  TmVar v s -> useVar v s
   Copy v s -> do
     vTy <- lookupVar v s
     case vTy of
@@ -384,11 +402,11 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
         unless (k == k') $ throwError $ ExpectedKind k k' $ getSpan tyArg
         decrementLts lts
         incRef body
-        pure $ Core (typeSub tyArg body) s $ AppTyCF t1Core tyArg
+        pure $ Core (typeSub tyArg body) s $ extendAppTy t1Core tyArg
       RefTy l (Univ Many lts v k body _) _ -> do
         useRef t1Ty
         incRef body
-        pure $ Core (typeSub tyArg body) s $ AppTyCF t1Core tyArg
+        pure $ Core (typeSub tyArg body) s $ extendAppTy t1Core tyArg
       _ -> throwError $ TyIsNotUniv t1Ty s
   AppTm t1 t2 s -> do
     -- Roughly we synthesize t1 and use that to check t2.
@@ -401,20 +419,23 @@ synth tm = verifyCtxSubset (getSpan tm) $ case tm of
         useRef aTy
         decrementLts lts
         incRef bTy
-        pure $ Core bTy s $ AppTmCF t1Core t2Core
+        pure $ Core bTy s $ extendAppTm t1Core t2Core
       RefTy lt (FunTy Many aTy lts bTy _) _ -> do
         checkBorrowList lts s
         t2Core <- check aTy t2
         useRef aTy
         useRef t1Ty
         incRef bTy
-        pure $ Core bTy s $ AppTmCF t1Core t2Core
+        pure $ Core bTy s $ extendAppTm t1Core t2Core
       _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1
   -- ltOfFVar is the name of the variable used for the lifetime of the variable f, which is
   -- a reference to this function itself.
   FixTm _ _ s -> throwError $ CannotSynthFixTm s
-  StringLit txt s -> pure $ Core (TyCon (Var "String") s) s $ StringLitCF txt
-  IntLit i s -> pure $ Core (TyCon (Var "I64") s) s $ IntLitCF i
+  LiteralTm lit s ->
+    let ty = case lit of
+          IntLit _ -> TyCon (Var "I64") s
+          StringLit _ -> TyCon (Var "String") s
+    in pure $ Core ty s $ LiteralCF lit
 
 check :: Ty -> Tm -> Tc Core
 check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
@@ -433,7 +454,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
           Just vTy -> unless (vTy == aTy) $ throwError $ ExpectedType aTy vTy
           Nothing -> pure ()
         bodyCore <- checkFun s v body m aTy lts bTy
-        cf $ LamCF v aTy bodyCore
+        cf $ extendLam v aTy bodyCore
       _ -> throwError $ ExpectedFunType ty s
   Poly mbBind body s1 ->
     case ty of
@@ -444,9 +465,12 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
           unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
           unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
         bodyCore <- checkPoly s1 b2 k2 body m lts bodyTy
-        cf $ PolyCF b2 k2 bodyCore
+        cf $ extendPoly b2 k2 bodyCore
       _ -> throwError $ ExpectedUnivType ty s1
   FixTm funVar body s1 -> do
+    case body of
+      FixTm _ _ s2 -> throwError $ OnlyOneFix s1
+      _ -> pure ()
     bodyCore <- case ty of
       FunTy m xTy lts bodyTy s2 -> do
         checkBorrowList lts s1
@@ -455,7 +479,7 @@ check ty tm = verifyCtxSubset (getSpan tm) $ case tm of
         checkBorrowList lts s1
         checkFixTm s1 m funVar body ty
       _ -> throwError $ ExpectedFixableType ty s1
-    cf $ FixCF funVar bodyCore
+    cf $ extendFix funVar bodyCore
   _ -> do
     tmCore@Core{ty=ty'} <- synth tm
     if ty == ty'

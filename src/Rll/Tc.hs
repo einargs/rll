@@ -7,8 +7,8 @@ module Rll.Tc
   , rawTypeSub, typeSub
   , lifetimeVars, lifetimeSet
   , ltSetToTypes, ltsForClosure, ltSetToVars
-  , incrementLts, decrementLts
-  , dropVar, useVar, useRef, incRef
+  , incrementLts, decrementLts, variablesBorrowing
+  , dropVar, useRef, incRef
   , rawIndexTyVars, indexTyVars, indexTyVarsInTm
   ) where
 
@@ -119,21 +119,34 @@ kindCheck k ty = do
   k' <- kindOf ty
   unless (k==k') $ throwError $ ExpectedKind k k' $ getSpan ty
 
+-- | Used to implement checkForRank2 and `checkForPoly`.
+checkTyForm :: (Ty -> TyErr) -> Bool -> Ty -> Tc ()
+checkTyForm err = go False where
+  go polyInRet activateErr ty = case ty of
+    TyVar _ _ -> pure ()
+    TyCon _ _ -> pure ()
+    LtOf _ _ -> pure ()
+    LtJoin _ _ -> pure ()
+    RefTy _ aTy _ -> f aTy
+    FunTy _ aTy lts bTy _ ->
+      go polyInRet True aTy *> go polyInRet activateErr bTy
+    Univ _ lts _ tyVarKind bodyTy _
+      | activateErr -> throwError $ err ty
+      | polyInRet -> throwError $ NoPolyInRet ty
+      | otherwise -> f bodyTy
+    TyApp aTy bTy _ -> f aTy *> f bTy
+    where f = go polyInRet activateErr
+
 -- | Throw an error if the type is a rank 2 type.
 checkForRank2 :: Ty -> Tc ()
-checkForRank2 = go False where
-    go activate ty = case ty of
-      TyVar _ _ -> pure ()
-      TyCon _ _ -> pure ()
-      LtOf _ _ -> pure ()
-      LtJoin _ _ -> pure ()
-      RefTy _ aTy _ -> f aTy
-      FunTy _ aTy lts bTy _ -> go True aTy *> f bTy
-      Univ _ lts _ tyVarKind bodyTy _
-        | activate -> throwError $ NoRank2 ty
-        | otherwise -> f bodyTy
-      TyApp aTy bTy _ -> f aTy *> f bTy
-      where f = go activate
+checkForRank2 = checkTyForm NoRank2 False
+
+-- | Check for polymorphic functions in a data type.
+--
+-- We call this on the functions that are added to the terms,
+-- not the individual member types.
+checkForPoly :: Ty -> Tc ()
+checkForPoly = checkTyForm NoPolyInField False
 
 -- | Check that the type is a proper type and isn't rank 2.
 sanityCheckType :: Ty -> Tc ()
@@ -141,6 +154,7 @@ sanityCheckType ty = do
   kindCheck TyKind ty
   checkForRank2 ty
 
+-- | Add a data type with the given name to the context.
 addDataType :: Var -> DataType -> Tc ()
 addDataType tyName dt = do
   ctx <- get
@@ -160,8 +174,11 @@ addDataType tyName dt = do
     { moduleTerms = foldl' (flip $ uncurry M.insert) ctx.moduleTerms terms'
     , dataTypes = M.insert tyName dt ctx.dataTypes
     }
-  forM_ terms' $ sanityCheckType . snd
+  forM_ terms' $ check . snd
   where
+    check ty = do
+      kindCheck TyKind ty
+      checkForPoly ty
     f :: Span -> [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
     f s tyArgs (name, args) = (Var name, result) where
       finalTy = foldl' g (TyCon tyName s) $ zip tyArgs [0..] where
@@ -296,8 +313,7 @@ ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
     Poly _ t1 _ -> g (i+1) t1 l
     TmVar _ _ -> l
     TmCon _ _ -> l
-    IntLit _ _ -> l
-    StringLit _ _ -> l
+    LiteralTm _ _ -> l
     Copy v s -> case M.lookup v ctx.termVars of
       Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> (s, Right v ):l
       Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> (s, Left x ):l
@@ -363,23 +379,6 @@ dropVar v s = do
     FunTy Many _ l _ _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
   deleteVar v s
-
--- | This is used to "use" a term var. If it cannot find a term
--- var in termVars to consume, it looks in moduleTerms.
-useVar :: Var -> Span -> Tc Ty
-useVar v s = do
-  ctx <- get
-  case M.lookup v ctx.termVars of
-    Just (borrowCount, ty) -> do
-      when (borrowCount < 0) $ throwError $ CompilerLogicError "subzero borrow count" (Just s)
-      unless (borrowCount == 0) $ do
-        borrowers <- variablesBorrowing v
-        throwError $ CannotUseBorrowedVar v borrowers s
-      deleteVar v s
-      pure ty
-    Nothing -> case M.lookup v ctx.moduleTerms of
-      Just ty -> pure ty
-      Nothing -> expectedTermVar v s
 
 -- | Utility function for decrementing the borrow count of the referenced variable
 -- when we consume a reference term.
@@ -520,6 +519,5 @@ indexTyVarsInTm = g 0 M.empty where
     TmCon _ _ -> pure term
     Copy _ _ -> pure term
     RefTm _ _ -> pure term
-    IntLit _ _ -> pure term
-    StringLit _ _ -> pure term
+    LiteralTm _ _ -> pure term
     where f = g i idxMap

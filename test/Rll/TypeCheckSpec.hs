@@ -23,7 +23,7 @@ spec = parallel do
         test : Unit
         = let a = Unit in let b = &a in drop b in a;
         |]
-    fit "can check a case of" do
+    it "can check a case of" do
       baseTest [txt|
         test : Unit =
         case Left Int of
@@ -803,9 +803,17 @@ spec = parallel do
         s2 : String = "Everyone";
         |]
 
-    -- TODO: it will throw an error if a data type has a member with a kind that isn't Type
-
-    -- TODO: will throw an error if we use a function out of order.
+    fit "Quick test" do
+      baseTest [txt|
+        test : Unit
+        = let u = Unit in
+        let f = \ x: Unit ->
+          let r = &u in
+          drop r in
+          x in
+        let Unit = f Unit in
+        u;
+        |]
 
 
 

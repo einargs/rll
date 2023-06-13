@@ -116,7 +116,8 @@ compareCoreToTm fullCore@(Core cTy _ core) tm = case (core, tm) of
     <|> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
   (LamCF sv _ c1, FunTm tv _ t1 _) -> sv #= tv <|> compareCoreToTm c1 t1
   (PolyCF _ _ c1, Poly _ t1 _) -> compareCoreToTm c1 t1
-  (VarCF cv, TmVar tv _) -> cv #= tv
+  (ModuleVarCF cv, TmVar tv _) -> cv #= tv
+  (LocalVarCF cv, TmVar tv _) -> cv #= tv
   (ConCF cv, TmCon tv _) -> cv #= tv
   (CopyCF cv, Copy tv _) -> cv #= tv
   (RefCF cv, RefTm tv _) -> cv #= tv
@@ -124,8 +125,7 @@ compareCoreToTm fullCore@(Core cTy _ core) tm = case (core, tm) of
   (DropCF cv c1, Drop tv t1 _) -> cv #= tv <|> compareCoreToTm c1 t1
   (AppTmCF c1 c2, AppTm t1 t2 _) -> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
   (FixCF cv c1, FixTm tv t1 _) -> cv #= tv <|> compareCoreToTm c1 t1
-  (IntLitCF ci, IntLit ti _) -> ci #= ti
-  (StringLitCF cs, StringLit ts _) -> cs #= ts
+  (LiteralCF cl, LiteralTm tl _) -> cl #= tl
   _ -> err
   where
   err = Just (fullCore, tm)

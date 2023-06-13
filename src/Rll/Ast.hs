@@ -114,21 +114,24 @@ class Spans a where
 instance Spans SVar where
   getSpan sv = sv.span
 
-data Ty
-  = TyVar TyVar Span
-  | TyCon Var Span
-  | LtOf Var Span
+data TyF a
+  = TyVar TyVar
+  | TyCon Var
+  | LtOf Var
   -- | function type; Multiplicity, Input, Lifetime, Output
-  | FunTy Mult Ty Ty Ty Span
+  | FunTy Mult a a a
   -- | Union of lifetimes.
   --
   -- Empty list means static lifetime.
-  | LtJoin [Ty] Span
-  | RefTy Ty Ty Span
+  | LtJoin [a]
+  | RefTy a a
   -- | Multiplicity, lifetimes, type var name, type var kind, body
-  | Univ Mult Ty TyVarBinding Kind Ty Span
+  | Univ Mult a TyVarBinding Kind a
   -- | Type application to type operators
-  | TyApp Ty Ty Span
+  | TyApp a a
+  deriving (Eq, Functor, Foldable, Traversable)
+
+data Ty = Ty { span :: Span, tyf :: (TyF Ty) }
   deriving (Eq)
 
 -- | Indicates when we need to add parentheses when pretty printing a type.
@@ -143,23 +146,23 @@ data TyParenLevel
 
 -- | Pretty prints types.
 basePrettyTy :: TyParenLevel -> Ty -> Doc ann
-basePrettyTy parenLevel ty = case ty of
-  TyVar tv _ -> pretty tv
-  TyCon v _ -> pretty v
-  LtOf v _ -> "'" <> pretty v
-  FunTy m a lts b _ -> parenFor TyFunParen $
+basePrettyTy parenLevel ty@Ty{tyf} = case tyf of
+  TyVar tv -> pretty tv
+  TyCon v -> pretty v
+  LtOf v -> "'" <> pretty v
+  FunTy m a lts b -> parenFor TyFunParen $
     basePrettyTy TyFunParen a <> layer (mconcat
     [ "-", prettyM m
     , basePrettyTy NoTyParen lts
     , ">" <+> basePrettyTy NoTyParen b
     ])
-  LtJoin tys _ -> list $ basePrettyTy NoTyParen <$> tys
-  RefTy l t _ -> "&" <> basePrettyTy TyAppParen l <+> basePrettyTy TyAppParen t
-  Univ m lts b k t _ -> parenFor TyFunParen $ "forall"
+  LtJoin tys -> list $ basePrettyTy NoTyParen <$> tys
+  RefTy l t -> "&" <> basePrettyTy TyAppParen l <+> basePrettyTy TyAppParen t
+  Univ m lts b k t -> parenFor TyFunParen $ "forall"
     <+> prettyM m <+> basePrettyTy TyAppParen lts
     <+> pretty b.name <> ":" <+> pretty k <> "."
     <> layer (basePrettyTy NoTyParen t)
-  TyApp a b _ -> parenFor TyAppParen $ pretty a <+> pretty b
+  TyApp a b -> parenFor TyAppParen $ pretty a <+> pretty b
   where
     layer doc = softline <> nest 2 doc
     prettyM m = case m of
@@ -174,77 +177,40 @@ instance Pretty Ty where
 instance Show Ty where
   show = show . pretty
 
-{-
-instance Show Ty where
-  show (TyVar tv _) = show tv
-  show (TyCon v _) = T.unpack v.name
-  show (LtOf v _) = "'" <> T.unpack v.name
-  show (FunTy m a lts b _) = show a <> " -" <> m' <> show lts <> "> " <> show b
-    where m' = case m of
-            Many -> "M"
-            Single -> "S"
-  show (LtJoin tys _) = show tys
-  show (RefTy l t _) = "&" <> show l <> " " <> show t
-  show (Univ m lts b k t _) = "forall " <> m' <> " " <> show lts <> " "
-                              <> T.unpack b.name <> " : " <> show k <> ". " <> show t
-    where m' = case m of
-            Many -> "M"
-            Single -> "S"
-  show (TyApp t1 t2 _) = "(" <> show t1 <> ") " <> " (" <> show t2 <> ")"
--}
-
 instance Spans Ty where
-  getSpan ty = case ty of
-    TyVar _ s -> s
-    TyCon _ s -> s
-    LtOf _ s -> s
-    FunTy _ _ _ _ s -> s
-    LtJoin _ s -> s
-    RefTy _ _ s -> s
-    Univ _ _ _ _ _ s -> s
-    TyApp _ _ s -> s
+  getSpan = (.span)
 
-data CaseBranch = CaseBranch SVar [SVar] Tm
-  deriving (Show, Eq)
+data CaseBranch a = CaseBranch SVar [SVar] a
+  deriving (Show, Eq, Functor, Foldable, Traversable)
 
-data Tm
-  = Case Tm [CaseBranch] Span
-  | LetStruct SVar [SVar] Tm Tm Span
-  | Let SVar Tm Tm Span
-  | FunTm SVar (Maybe Ty) Tm Span
-  | Poly (Maybe (TyVarBinding, Kind)) Tm Span
-  | TmVar Var Span
-  | TmCon Var Span
-  | Copy Var Span
-  | RefTm Var Span
-  | AppTy Tm Ty Span
-  | Drop SVar Tm Span
-  | AppTm Tm Tm Span
-  -- | function name var, body
-  --
-  -- Cannot be synthesized.
-  | FixTm SVar Tm Span
-  | Anno Tm Ty Span
-  | IntLit Integer Span
-  | StringLit Text Span
+data Literal
+  = IntLit Integer
+  | StringLit Text
+  deriving (Eq)
+
+instance Show Literal where
+  show (IntLit i) = show i
+  show (StringLit txt) = show txt
+
+data TmF a
+  = Case a [CaseBranch a]
+  | LetStruct SVar [SVar] a a
+  | Let SVar a a
+  | FunTm (Maybe SVar) [(TyVarBinding, Kind)] [(SVar, Maybe Ty)] a
+  | TmVar Var
+  | TmCon Var
+  | Copy Var
+  | RefTm Var
+  | AppTy a Ty
+  | Drop SVar a
+  | AppTm a
+  | Anno a Ty
+  | LiteralTm Literal
+  deriving (Show, Eq, Functor, Foldable, Traversable)
+
+data Tm = Tm {span :: Span, tmf :: TmF Tm }
   deriving (Show, Eq)
 
 instance Spans Tm where
-  getSpan tm = case tm of
-    Case _ _ s -> s
-    LetStruct _ _ _ _ s -> s
-    Let _ _ _ s -> s
-    FunTm _ _ _ s -> s
-    Poly _ _ s -> s
-    TmVar _ s -> s
-    TmCon _ s -> s
-    Copy _ s -> s
-    RefTm _ s -> s
-    AppTy _ _ s -> s
-    Drop _ _ s -> s
-    AppTm _ _ s -> s
-    FixTm _ _ s -> s
-    Anno _ _ s -> s
-    IntLit _ s -> s
-    StringLit _ s -> s
+  getSpan = (.span)
 

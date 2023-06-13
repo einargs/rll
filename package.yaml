@@ -67,6 +67,7 @@ default-extensions:
 - DerivingVia
 - ImportQualifiedPost
 - OverloadedRecordDot
+- DeriveTraversable
 
 ghc-options:
 - -Wincomplete-patterns

@@ -1,4 +1,5 @@
 # Current
+## Prep
 - [X] Pretty printer for types
 - [X] I need to implement an anti-rank-2 check.
 - [X] Implement built in integers and integer parsing.
@@ -8,18 +9,67 @@
     as part of type checking.
   - [X] Write the tests so that the type check tests automatically compare the
     `Core` to `Tm`.
-- [ ] Write a pass to specialize function code.
-  - We keep track of how a function has been applied inside a local context
-    for that pass.
-  - [ ] I'll need a unique way to identify the specialized functions so they
-    can be looked up.
-  - Do we specialize functions as part of Elab? I'm thinking that I'll key the
-    Elab structure to a DataKinds `Stage` type argument so I can remove polymorphism
-    and such from the specialized stage? Or maybe I should do a different tree then.
-    Or maybe I should specialize while generating Elab, and generate Elab in it's own
-    pass that also calls type checking? No. Elaboration is type checking.
-  - I think that I'll have a fully typed stage, and then I'll have a specialized tree
-    that simplifies functions etc.
+
+## Specialization
+Write a pass to specialize function code.
+
+Questions
+- Do I want to have the IR include template functions and then just list how they're
+  instantiated? I think that's probably better and easier for interacting with other
+  modules?
+- If `f` is poly over `a`, and calls `g` with `a`, then how do we record that? I think
+  this means that we're fully specializing our functions.
+- Top level values are treated as no-argument functions to build those values.
+
+- [X] IR for the specialization stage.
+- [ ] Rewrite parser to allow function definitions as a full block.
+- [ ] Rewrite Tm and Ty to use the functor pattern.
+- [ ] Implement error if type applications are not fully applied.
+  - Eventually I'll have type inference that will subsume the kind of inference
+    algorithm I'd need to allow partial application in returns etc.
+
+- [ ] Move the type substitution stuff to another file so that `Spec.hs` doesn't
+  need to directly import `Tc.hs`
+  - [ ] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
+    stuff can just import that and be in it's own module.
+- [ ] Generate information for what values are consumed in a closure and store it in `Core`.
+  - We currently allow implicit reference capture. In other words, if we define a value
+    outside of a closure and create a reference to it inside the closure, that still works.
+    ```
+    test : Unit
+    = let u = Unit in
+    let f = \ x: Unit ->
+      let r = &u in
+      drop r in
+      x in
+    let Unit = f Unit in
+    u;
+    ```
+    It will be easier to record what external variables have references taken of them
+    and record that in the closure environment. Then in `Spec` we'll transform any references
+    to those variables to a specific marker. `Imp` will probably keep the same form since it
+    doesn't reify the closure environment.
+- [ ] I think I might make `Core` collapse lambdas. Probably `Poly`s too.
+- [ ] Add an error to `TypeCheck.hs` that requires that we have a `main` entry point
+  in each module that I can start specializing from.
+- [ ] Write name mangler.
+- [ ] Just go ahead and fully specialize the types now. `Imp` can use the same data
+  structures probably, and this is the specialization stage.
+- [ ] We will collapse immediately nested applications into a single call if possible.
+  - The `Imp` stage will have specific "instructions" for whether a function is
+    immediately invoked or is partially applied and results in a thunk.
+- [ ] Make explicit the types of partially applied functions etc.
+  - How do constructors play into this? I guess they have to be partially applied functions.
+    Later I can optimize and do runtime trickery.
+
+- For now we're going to remove interleaving `Univ` and function types.
+  - [ ] Fix broken tests.
+  - [ ] Add tests to verify that this throws an error.
+
+- [ ] Rewrite the syntax to parse a full function instead of piecemeal
+  with PolyTm and FunTm and FixTm.
+
+## LLVM
 - [ ] Install LLVM.
 - [ ] Get a micro-example of a module compiling with some literal llvm code.
 - [ ] Write out a compile monad for turning Elab into LLVM.

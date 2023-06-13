@@ -168,6 +168,15 @@ data TyErr
   | IsNotTyOp Kind Span
   -- | This Univ type creates a rank 2 type.
   | NoRank2 Ty
+  -- | No polymorphic functions in a data type field.
+  | NoPolyInField Ty
+  -- | Cannot return a polymorphic function.
+  | NoPolyInRet Ty
+  -- | Cannot wrap a fix expression around another
+  -- fix expression.
+  --
+  -- Span is for enclosing fix statement.
+  | OnlyOneFix Span
   deriving (Eq, Show)
 
 tpretty :: P.Pretty a => a -> Text
