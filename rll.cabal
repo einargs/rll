@@ -31,6 +31,7 @@ library
       Rll.Core
       Rll.Parser
       Rll.Spec
+      Rll.SpecIR
       Rll.Tc
       Rll.TypeCheck
       Rll.TypeError

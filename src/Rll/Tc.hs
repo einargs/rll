@@ -10,6 +10,7 @@ module Rll.Tc
   , incrementLts, decrementLts, variablesBorrowing
   , dropVar, useRef, incRef
   , rawIndexTyVars, indexTyVars, indexTyVarsInTm
+  , applyTypeParams
   ) where
 
 import Rll.Ast
@@ -82,7 +83,9 @@ kindOf ty@Ty{span=s, tyf} = case tyf of
   TyVar tv -> lookupKind tv s
   TyCon name -> lookupDataType name s >>= \case
     StructType _ tyParams _ _ -> pure $ kindFrom tyParams
-    BuiltinType _ tyParams -> pure $ kindFrom tyParams
+    BuiltInType b -> pure $ case b of
+      BuiltInI64 -> TyKind
+      BuiltInString -> TyKind
     EnumType _ tyParams _ _ -> pure $ kindFrom tyParams
   LtOf v -> lookupEntry v s *> pure LtKind
   FunTy _ aTy lts bTy -> do
@@ -156,7 +159,7 @@ addDataType tyName dt = do
   (terms, s) <- case dt of
     EnumType _ tyArgs caseM s -> pure $ (f s tyArgs <$> M.toList caseM, s)
     StructType v tyArgs args s -> pure $ ([f s tyArgs (v,args)], s)
-    BuiltinType _ _ -> throwError $
+    BuiltInType _ -> throwError $
       CompilerLogicError "Cannot add a built-in type to the context" Nothing
   case M.lookup tyName ctx.dataTypes of
     Just _ -> throwError $ DataTypeAlreadyExists tyName s
@@ -452,3 +455,14 @@ indexTyVarsInTm = g 0 M.empty where
       pure $ Anno t1' ty'
     _ -> traverse f tmf
     where f = g i idxMap
+
+-- | Substitute for the type parameter variables inside the fields of a
+-- data type.
+--
+-- Type arguments, params, data type fields.
+applyTypeParams :: [Ty] -> [TypeParam] -> [Ty] -> [Ty]
+applyTypeParams args params members = go (length args - 1) args params members where
+  go i [] [] members = members
+  go i (a:as) (p:ps) members = go (i-1) as ps $
+    rawTypeSub i a <$> members
+  go i _ _ _ = error "Should be caught by kind check"

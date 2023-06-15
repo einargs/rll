@@ -1,72 +1,45 @@
+{-# LANGUAGE BangPatterns #-}
 module Rll.Spec
   (
   ) where
 
 import Rll.Ast
-import Rll.Context (DataType(..))
+import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName)
 import Rll.Core
-import Rll.Tc (rawTypeSub)
+import Rll.Tc (rawTypeSub, applyTypeParams)
+import Rll.SpecIR
 
 import Data.HashMap.Strict qualified as M
-import Data.Text (Text)
--- import Data.Text qualified as T
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Data.List (foldl')
 import Control.Exception (assert)
-import Data.Hashable (Hashable(..))
+import Data.Text (Text)
 
+-- | Eventually we will need this to hold things like the type argument
+-- to a `Box`.
+data SpecBuiltIn
+  = SpecI64
+  | SpecString
+  deriving Show
+
+-- | A specialized data type with fully concrete types.
+--
+-- We remove the enum name since now we've mangled it.
+data SpecDataType
+  = SpecEnum (M.HashMap Text [Ty])
+  | SpecStruct Text [Ty]
+  -- | We do a translation stage to include any type arguments to
+  -- things like `Box`.
+  | SpecBuiltIn SpecBuiltIn
+  deriving Show
+
+-- | A declaration that has been specialized to have fully concrete types
+-- with no type variables in them.
 data SpecDecl
   = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty)] SpecIR
-  | Instantiate DataType [Ty]
-
-data SpecF a
-  = CaseSF a [CaseBranch a]
-  | LetStructSF SVar [SVar] a a
-  | LetSF SVar a a
-  -- | Create an initial closure for a function.
-  --
-  -- The first hashset is variables that are moved into the closure.
-  -- The second is variables that are referenced by it and will have
-  -- their references put in the closure.
-  | ClosureSF MVar ClosureEnv
-  -- | This is used to indicate that we're re-using the closure
-  -- environment for a recursive function call.
-  --
-  -- The second argument is the name of the variable holding
-  -- the recursive function reference and acts as an identifier.
-  | RecClosureSF MVar Var
-  -- | Local variable.
-  | VarSF Var
-  -- NOTE maybe have information about the source data type here? I'd
-  -- probably add that in when building `Core`.
-  -- | A data type constructor. Has the mangled name of the data type
-  -- and the name of the constructor.
-  | ConSF MVar Var
-  | CopySF Var
-  | RefSF Var
-  | DropSF SVar a
-  | AppSF a [a]
-  | LiteralSF Literal
-  deriving (Show, Eq, Functor, Foldable, Traversable)
-
-data SpecIR = SpecIR {ty :: Ty, span :: Span, specf :: (SpecF SpecIR)}
-
--- | A mangled variable name.
-data MVar = MVar Var Text
-  deriving (Show, Eq, Ord)
-
-instance Hashable MVar where
-  hashWithSalt s (MVar v t) = s `hashWithSalt` v `hashWithSalt` t
-
-mangleDataType :: Var -> [Ty] -> MVar
-mangleDataType v tys = undefined
-
-mangleFun :: Var -> [Ty] -> MVar
-mangleFun v tys = undefined
-
-mangleLambda :: MVar -> [Ty] -> Int -> MVar
-mangleLambda enclosingFun tys i = undefined
+  | SpecDataType SpecDataType
+  deriving Show
 
 data Lambda = PolyLambda
   { fix :: Maybe SVar
@@ -81,7 +54,7 @@ data Lambda = PolyLambda
 -- in the context.
 data LocalFun
   = PolyLF Int Lambda
-  | MonoLF MVar ClosureEnv
+  | MonoLF MVar Var
   | TopLF Var
   deriving Show
 
@@ -101,10 +74,16 @@ data SpecErr
   -- | You must fully apply the type arguments to a polymorphic
   -- function before you can use it as a first class value.
   | MustSpec Span
+  -- | Cannot immediately specialize a polymorphic lambda function.
+  --
+  -- Span of the lambda.
+  | NoImmediateSpec Span
+  deriving (Show, Eq)
 
 newtype Spec a = MkSpec { unSpec :: StateT SpecCtx (Except SpecErr) a }
   deriving (Functor, Applicative, Monad, MonadError SpecErr, MonadState SpecCtx)
 
+-- | Get an unspecialized core function.
 getCoreFun :: Var -> Spec Core
 getCoreFun name = do
   coreFuns <- gets (.coreFuns)
@@ -150,9 +129,21 @@ guardDecl mvar act = do
 lookupLocalFun :: Var -> Spec (Maybe LocalFun)
 lookupLocalFun v = M.lookup v <$> gets (.localFuns)
 
--- TODO function for specializing a data type.
+-- | Specializes a data type and registers it under the mangled name.
+--
+-- Only does so once.
 specDataType :: DataType -> [Ty] -> Spec MVar
-specDataType = undefined
+specDataType dt tyArgs = guardDecl name $ pure specDt
+  where
+  name = mangleDataType (getDataTypeName dt) tyArgs
+  specDt = SpecDataType $ case dt of
+    EnumType name tyParams cases _ -> SpecEnum $
+      applyTypeParams tyArgs tyParams <$> cases
+    StructType con tyParams fields _ -> SpecStruct con $
+      applyTypeParams tyArgs tyParams fields
+    BuiltInType enum -> SpecBuiltIn $ case enum of
+      BuiltInI64 -> assert (tyArgs == []) $ SpecI64
+      BuiltInString -> assert (tyArgs == []) $ SpecString
 
 -- | function for specializing the body of functions.
 specExpr :: Core -> Spec SpecIR
@@ -182,16 +173,14 @@ specExpr core@Core{span, coref} = do
       specExpr t1 <*> traverse (traverse specExpr) branches
     AppTyCF t1 tys -> case t1.coref of
       -- Recursive functions should be picked up here as well.
-      LocalVarCF v -> fmap sf <$> specLambda v tys
+      LocalVarCF v -> sf <$> specLocalFun v tys
       ConCF dt var -> do
         mvar <- specDataType dt tys
         pure $ sf $ ConSF mvar var
       ModuleVarCF v -> do
         mvar <- specFunDef v tys
         pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
-      LamCF fix polyB argB env body -> do
-        case fix of
-          fff
+      LamCF fix polyB argB env body -> throwError $ NoImmediateSpec span
       -- NOTE: how do we handle trying to specialize a reference?
       -- I think that's automatically rejected?
       _ -> error "Can't specialize this? Not certain if this can happen."
@@ -224,8 +213,12 @@ addSpecDecl mvar sd = modify' \ctx ->
 storeLambda :: Maybe SVar -> [(SVar, Ty)] -> ClosureEnv -> Core -> Spec MVar
 storeLambda fix args env body = do
   name <- freshLambdaName []
-  body' <- specExpr body
+  let wrap = case fix of
+        Just recName -> withLocalFun recName.var (MonoLF name recName.var)
+        Nothing -> id
+  body' <- wrap $ specExpr body
   addSpecDecl name $ SpecFun env fix args body'
+  pure name
 
 -- | Register and unregister a lam
 withLocalFun :: Var -> LocalFun -> Spec a -> Spec a
@@ -244,7 +237,7 @@ withPolyLambda v lam@PolyLambda{fix} act = do
   count <- gets (.lambdaCounter)
   modify' \ctx -> ctx
     {lambdaCounter = ctx.lambdaCounter + 1}
-  let localFun = PolyLF i lam
+  let localFun = PolyLF count lam
       -- here we create a second entry for the recursive
       -- function name pointing to the same `LocalFun`.
       wrap = case fix of
@@ -261,7 +254,7 @@ specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
   Just localFun -> case localFun of
     -- Since this lambda only has one version, we can just point to what's
     -- already compiled
-    MonoLF mvar env -> pure $ RecClosureSF mvar env
+    MonoLF mvar envVar -> pure $ RecClosureSF mvar envVar
     -- This is just the name of a top level function.
     TopLF v -> do
       mvar <- specFunDef v tyArgs
@@ -281,14 +274,14 @@ specFunDef name tyArgs = guardDecl mangledName do
   -- We save the lambdas we started with, and use a blank map for
   -- when we're specializing this function, since it's separate.
   SpecCtx
-    { lambdas=entryLambdas
+    { localFuns=entryLocals
     , enclosingFun=entryEnclosingFun
     } <- get
-  modify' \ctx -> ctx{ lambdas=M.empty, enclosingFun=mangledName }
+  modify' \ctx -> ctx{ localFuns=M.empty, enclosingFun=mangledName }
   (fix, args, coreBody) <- getBody <$> getCoreFun name
   body <- specExpr coreBody
   modify' \ctx -> ctx
-    { lambdas = entryLambdas
+    { localFuns = entryLocals
     , enclosingFun = entryEnclosingFun
     }
   pure $ SpecFun (ClosureEnv M.empty) fix args body
@@ -315,7 +308,7 @@ specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
     { specDecls = M.empty
     , coreDataTypes = dataTypes
     , coreFuns = M.fromList coreFuns
-    , lambdas = M.empty
+    , localFuns = M.empty
     , lambdaCounter = 0
     , enclosingFun = error "Should be overriden by specFunDef"
     }

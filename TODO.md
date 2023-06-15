@@ -1,54 +1,24 @@
 # Current
-## Prep
-- [X] Pretty printer for types
-- [X] I need to implement an anti-rank-2 check.
-- [X] Implement built in integers and integer parsing.
-- [X] Implement built in strings and string parsing.
-- [X] Elaborated syntax with full type annotations.
-  - Is it generated in another pass or as part of type checking? I think
-    as part of type checking.
-  - [X] Write the tests so that the type check tests automatically compare the
-    `Core` to `Tm`.
-
 ## Specialization
 Write a pass to specialize function code.
 
 Questions
+- How will specializing functions for other modules work?
 - Do I want to have the IR include template functions and then just list how they're
   instantiated? I think that's probably better and easier for interacting with other
   modules?
-- If `f` is poly over `a`, and calls `g` with `a`, then how do we record that? I think
-  this means that we're fully specializing our functions.
-- Top level values are treated as no-argument functions to build those values.
 
 Thoughts
 - I could make Core figure out when we're mentioning a polymorphic function in
   a variable and then require it to have the type applications. Combine the type apps
   with just mentioning the function.
-- [ ] let's go and rewrite the parser so that all polymorphic function definition
-  happens in a `let x y = ... in` or function definition. Lambdas are strictly normal.
-- [ ] Maybe want to start including the data type in each case and let struct
-  in the `Core` stage?
+- [X] Make sure that poly lambdas can shadow.
+- [X] Providing the closure environment when specializing a recursive function is
+  going to be tricky.
+  - I think tracking the name of the rec fun variable and specializing when
+    it's used will work. Can't be used without specializing, and the trick will help.
 
-- [X] IR for the specialization stage.
-- [ ] Make sure that poly lambdas can shadow.
-- [ ] Make recursive function references refer to the inner type for now.
-- [ ] Providing the closure environment when specializing a recursive function is
-  going to be tricky. Possibly 
-- [ ] Write a test to make sure that applying type arguments to a reference to a poly
-  function gets you a reference to the resulting function and not a value?
-- [X] Rewrite Tm and Ty to use the functor pattern.
-- [X] We'll do errors for if type applications don't fully instantiate something
-  in the `Spec` layer.
-- [X] Implement error if type applications are not fully applied.
-  - Eventually I'll have type inference that will subsume the kind of inference
-    algorithm I'd need to allow partial application in returns etc.
-
-- [ ] Move the type substitution stuff to another file so that `Spec.hs` doesn't
-  need to directly import `Tc.hs`
-  - [ ] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
-    stuff can just import that and be in it's own module.
-- [ ] Generate information for what values are consumed in a closure and store it in `Core`.
+- [X] Generate information for what values are consumed in a closure and store it in `Core`.
   - We currently allow implicit reference capture. In other words, if we define a value
     outside of a closure and create a reference to it inside the closure, that still works.
     ```
@@ -65,25 +35,30 @@ Thoughts
     and record that in the closure environment. Then in `Spec` we'll transform any references
     to those variables to a specific marker. `Imp` will probably keep the same form since it
     doesn't reify the closure environment.
-- [ ] I think I might make `Core` collapse lambdas. Probably `Poly`s too.
+- [X] Write name mangler.
+- [X] Just go ahead and fully specialize the types now. `Imp` can use the same data
+  structures probably, and this is the specialization stage.
+- [ ] Fix the broken tests for type checking after syntax changed.
 - [ ] Add an error to `TypeCheck.hs` that requires that we have a `main` entry point
   in each module that I can start specializing from.
-- [ ] Write name mangler.
-- [ ] Just go ahead and fully specialize the types now. `Imp` can use the same data
-  structures probably, and this is the specialization stage.
-- [ ] We will collapse immediately nested applications into a single call if possible.
-  - The `Imp` stage will have specific "instructions" for whether a function is
-    immediately invoked or is partially applied and results in a thunk.
+- [ ] Move the type substitution stuff to another file so that `Spec.hs` doesn't
+  need to directly import `Tc.hs`
+  - [ ] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
+    stuff can just import that and be in it's own module.
+- [ ] Figure out how to write tests for `Spec`. Maybe I'll write a custom parser?
+  - Can just `Fix` `SpecF` too, and then write a custom comparison function.
+- [ ] let's go and rewrite the parser so that all polymorphic function definition
+  happens in a `let x y = ... in` or function definition. Lambdas are strictly normal.
+  - This will make things easier I think?
+
+## Imp
+- The `Imp` stage will have specific "instructions" for whether a function is
+  immediately invoked or is partially applied and results in a thunk.
 - [ ] Make explicit the types of partially applied functions etc.
   - How do constructors play into this? I guess they have to be partially applied functions.
     Later I can optimize and do runtime trickery.
-
-- For now we're going to remove interleaving `Univ` and function types.
-  - [ ] Fix broken tests.
-  - [ ] Add tests to verify that this throws an error.
-
-- [ ] Rewrite the syntax to parse a full function instead of piecemeal
-  with PolyTm and FunTm and FixTm.
+- [ ] Maybe want to start including the data type in each case and let struct
+  in the `Core` stage? We'll see if this is useful for `Imp`.
 
 ## LLVM
 - [ ] Install LLVM.
@@ -114,8 +89,14 @@ values.
   - Eventually this will still be able to have polymorphic functions as long as
     the polymorphism is contained within references.
   - This stage will also remove all lambdas.
+- Then we have `Imp` where we'll fully define what thunks and context pointers will look like.
+  - Probably also will turn enums into structs and use casts. Actually, no, I'll probably have to
+    wait on that because I need LLVM info about alignment and shit.
+  - Top level values are treated as no-argument functions to build those values.
 
-When we implement traits, I think that Spec will be where we elaborate all of the traits to stuff.
+When we implement traits, I think that `Spec` will be where we elaborate all of the traits to stuff.
+- Or that might happen with resolving traits in `Core` and then making the vtables explicit in
+  `Imp`.
 
 ## Eventually
 - [ ] Allow rank 2 types when they're the same representation (i.e. variables inside boxes or references).
@@ -135,54 +116,57 @@ Future tests.
 - [ ] will throw an error if we use a function out of order.
   - Eventually I want mutual recursion and pre-declaration, but this *should* be current
     behavior so nail it down.
+- [ ] Write a test to make sure that applying type arguments to a reference to a poly
+  function gets you a reference to the resulting function and not a value.
+- [ ] Add test code to specifically check that the correct errors are triggered at the right spots.
+- [ ] Write some tests to make sure I can't trigger any problems with e.g. cloning and dropping my
+  static lifetime references (i.e. recursive function references).
 
 # Eventual Polish
 These are eventual things to do for polishing.
 - [X] Label all the parser nodes for better error messages.
-- [ ] Avoid calculating difference between entrance and exit scopes twice for mult and consumed
-  variables.
-- [X] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
-- [ ] Add test code to specifically check that the correct errors are triggered at the right spots.
-- [ ] Remove excess `try` in the parser. Probably take it out of branch and then manually
-  add try where necessary.
-- [ ] Make sure variable names and such are strict text.
-- [ ] Adjust the parser so that lowerText and upperText parse any kind of text, they just throw
-  a parse error for incorrect capitalization.
 - [X] I'm going to need like a `SpanVar` type for e.g. function arguments where I want to be able
   to point at it.
+- [X] Add a `BuiltinType` to `DataType` for `String` and `I64`.
+- [X] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
+- [X] Make sure variable names and such are strict text.
+- [X] Rewrite to use recursion schemes.
+- [ ] Adjust the parser so that lowerText and upperText parse any kind of text, they just throw
+  a parse error for incorrect capitalization.
+- [ ] check to make sure no top-level functions are single use. We can have top level values tho.
+- [ ] Rewrite to use the full recursion scheme library.
+- [ ] Avoid calculating difference between entrance and exit scopes twice for mult and consumed
+  variables.
+- [ ] Remove excess `try` in the parser. Probably take it out of branch and then manually
+  add try where necessary.
 - [ ] Maybe a way of indicating a span is not directly linked to source, but inferred from that source.
 - [ ] Probably create a dedicated type equality thing that ignores TyVarBinding etc so that equality
   means equality.
   - How will I handle testing then?
-- [ ] A map holding info about where variables are dropped so I can give nice error messages about stuff
+- [X] A map holding info about where variables are dropped so I can give nice error messages about stuff
   being dropped.
 - [ ] Rewrite some of my error messages to assume the specified type is correct not the term.
-- [ ] check to make sure no top-level functions are single use. We can have top level values tho.
 - [ ] Allow me to ommit the empty lifetime brackets in functions.
 - [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
 - [ ] Parser tests for annotation precedence -- make sure `\b -> b:T` is `\b -> (b:T)`
-- [ ] Decide whether having the struct name in the data type is redundant
-- [ ] Rewrite to use recursion schemes.
 - [ ] See if I can optimize type substitution by only shifting once I'm replacing with the
   argument.
 - [ ] Test to make sure that a TypeIsNotStruct error on a reference to a type doesn't highlight
   the entire type, just the inside of the reference type.
 - [ ] Adapt the really nice highlight diffing from HSpec for when I'm saying "expected x but got y"
-- [ ] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
+- [X] Changing the closure end thing from an arrow to a dot will help avoid it being confused for a type
   and allow for better error messages.
 - [ ] Add tests for parsing character escape sequences, though since that's done by megaparsec that
   might not be needed.
-- [X] Add a `BuiltinType` to `DataType` for `String` and `I64`.
 - [ ] I could do all of the `sanityCheckType` inside of `indexTyVarsInTm`. I think I'd have to change
   `sanityCheckType` for it.
+  - I don't think I want to do this.
 - [ ] Allow mutually recursive functions and using a function before it's defined.
-- [ ] Write some tests to make sure I can't trigger any problems with e.g. cloning and dropping my
-  static lifetime references (i.e. recursive function references).
 
 ## Better Errors
-- [ ] Eventually every error should have a test to make sure it triggers correctly.
 - [X] Improve the context join error to highlight the areas that conflict and label them directly
   with the conflicting variables.
+- [ ] Eventually every error should have a test to make sure it triggers correctly.
 - [ ] Make type arguments in lambdas bind a Span to the TyVarBinding or whatever for better error
   messages.
 

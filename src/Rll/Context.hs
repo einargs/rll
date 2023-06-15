@@ -1,5 +1,6 @@
 module Rll.Context
   ( Ctx(..), DataType(..), localEq, onTermVars, subsetOf, diffCtxTerms, emptyCtx
+  , BuiltInType(..), getDataTypeName
   ) where
 
 import Data.HashMap.Strict qualified as M
@@ -29,12 +30,8 @@ data Ctx = Ctx
 
 emptyCtx :: Ctx
 emptyCtx = Ctx M.empty M.empty [] M.empty M.empty dataTypes where
-  (#) :: Text -> [TypeParam] -> (Var, DataType)
-  txt # params = (Var txt, BuiltinType txt params)
-  dataTypes = M.fromList
-    [ "String" # []
-    , "I64" # []
-    ]
+  dataTypes = M.fromList $ f <$> [minBound..maxBound]
+  f ty = (Var $ getBuiltInName ty, BuiltInType ty)
 
 -- | Check for equality only on the local term variables and types.
 localEq :: Ctx -> Ctx -> Bool
@@ -68,8 +65,29 @@ diffCtxTerms full = f <$> diffs where
   f :: M.HashMap Var (Int, Ty) -> [(Var,Int,Ty)]
   f = fmap (\(a,(b,c)) -> (a,b,c)) . M.toList
 
+-- | Enum for our builtin types. Eventually we'll probably have some
+-- tool that hooks into C or something.
+--
+-- This is entirely a tag based enum. Any type arguments are provided
+-- via `TyApp`.
+data BuiltInType
+  = BuiltInI64
+  | BuiltInString
+  deriving (Eq, Show, Enum, Bounded)
+
+getBuiltInName :: BuiltInType -> Text
+getBuiltInName enum = case enum of
+  BuiltInI64 -> "I64"
+  BuiltInString -> "String"
+
 data DataType
   = EnumType Text [TypeParam] (M.HashMap Text [Ty]) Span
   | StructType Text [TypeParam] [Ty] Span
-  | BuiltinType Text [TypeParam]
+  | BuiltInType BuiltInType
   deriving (Eq, Show)
+
+getDataTypeName :: DataType -> Text
+getDataTypeName dt = case dt of
+  EnumType n _ _ _ -> n
+  StructType n _ _ _ -> n
+  BuiltInType enum -> getBuiltInName enum

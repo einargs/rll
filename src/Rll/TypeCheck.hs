@@ -117,15 +117,6 @@ addPartialBorrowVar v s lt bTy = do
     RefTy lt _ -> throwError $ ExpectedKind LtKind TyKind $ getSpan lt
     _ -> error "toRef should ensure type is always a RefTy"
 
--- | Substitute for the type parameter variables inside the fields of a
--- data type.
-applyTypeParams :: [Ty] -> [TypeParam] -> [Ty] -> [Ty]
-applyTypeParams args params members = go (length args - 1) args params members where
-  go i [] [] members = members
-  go i (a:as) (p:ps) members = go (i-1) as ps $
-    rawTypeSub i a <$> members
-  go i _ _ _ = error "Should be caught by kind check"
-
 -- | Pull apart a fully applied type constructor.
 --
 -- Takes an error builder function and the type. Returns the type con name,
@@ -189,6 +180,7 @@ caseClause caseSpan t1 branches tcMethod = do
         EnumType _ tyParams conMap _ -> do
           pure $ (tyName, M.map (applyTypeParams args tyParams) conMap)
         _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
+    -- | Type check a branch of the case expression.
     handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch Tm -> Tc Core
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
       case M.lookup conVar.var.name conMap of

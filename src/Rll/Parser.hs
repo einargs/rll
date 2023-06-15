@@ -1,4 +1,4 @@
-{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE FunctionalDependencies, FlexibleInstances #-}
 module Rll.Parser (
   Parser, decl, fileDecls, tm, ty, RllParseError(..),
 ) where
