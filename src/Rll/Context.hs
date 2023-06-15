@@ -19,16 +19,16 @@ data Ctx = Ctx
   -- | De-brujin indices keep track of the type variables for easy type
   -- equality.
   , localTypeVars :: [Kind]
-  -- | List of module level terms.
-  --
-  -- We add functions and data type constructors to this.
-  , moduleTerms :: M.HashMap Var Ty
+  -- | Map of module level functions.
+  , moduleFuns :: M.HashMap Var Ty
+  -- | List of module level data constructors.
+  , moduleDataCons :: M.HashMap Var (DataType, Ty)
   -- | Mapping variables to declared data types.
   , dataTypes :: M.HashMap Var DataType
   } deriving (Eq, Show)
 
 emptyCtx :: Ctx
-emptyCtx = Ctx M.empty M.empty [] M.empty dataTypes where
+emptyCtx = Ctx M.empty M.empty [] M.empty M.empty dataTypes where
   (#) :: Text -> [TypeParam] -> (Var, DataType)
   txt # params = (Var txt, BuiltinType txt params)
   dataTypes = M.fromList
@@ -69,7 +69,7 @@ diffCtxTerms full = f <$> diffs where
   f = fmap (\(a,(b,c)) -> (a,b,c)) . M.toList
 
 data DataType
-  = EnumType [TypeParam] (M.HashMap Text [Ty]) Span
+  = EnumType Text [TypeParam] (M.HashMap Text [Ty]) Span
   | StructType Text [TypeParam] [Ty] Span
   | BuiltinType Text [TypeParam]
   deriving (Eq, Show)

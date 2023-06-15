@@ -21,10 +21,26 @@ Questions
   this means that we're fully specializing our functions.
 - Top level values are treated as no-argument functions to build those values.
 
+Thoughts
+- I could make Core figure out when we're mentioning a polymorphic function in
+  a variable and then require it to have the type applications. Combine the type apps
+  with just mentioning the function.
+- [ ] let's go and rewrite the parser so that all polymorphic function definition
+  happens in a `let x y = ... in` or function definition. Lambdas are strictly normal.
+- [ ] Maybe want to start including the data type in each case and let struct
+  in the `Core` stage?
+
 - [X] IR for the specialization stage.
-- [ ] Rewrite parser to allow function definitions as a full block.
-- [ ] Rewrite Tm and Ty to use the functor pattern.
-- [ ] Implement error if type applications are not fully applied.
+- [ ] Make sure that poly lambdas can shadow.
+- [ ] Make recursive function references refer to the inner type for now.
+- [ ] Providing the closure environment when specializing a recursive function is
+  going to be tricky. Possibly 
+- [ ] Write a test to make sure that applying type arguments to a reference to a poly
+  function gets you a reference to the resulting function and not a value?
+- [X] Rewrite Tm and Ty to use the functor pattern.
+- [X] We'll do errors for if type applications don't fully instantiate something
+  in the `Spec` layer.
+- [X] Implement error if type applications are not fully applied.
   - Eventually I'll have type inference that will subsume the kind of inference
     algorithm I'd need to allow partial application in returns etc.
 
@@ -160,11 +176,15 @@ These are eventual things to do for polishing.
 - [ ] I could do all of the `sanityCheckType` inside of `indexTyVarsInTm`. I think I'd have to change
   `sanityCheckType` for it.
 - [ ] Allow mutually recursive functions and using a function before it's defined.
+- [ ] Write some tests to make sure I can't trigger any problems with e.g. cloning and dropping my
+  static lifetime references (i.e. recursive function references).
 
 ## Better Errors
 - [ ] Eventually every error should have a test to make sure it triggers correctly.
 - [X] Improve the context join error to highlight the areas that conflict and label them directly
   with the conflicting variables.
+- [ ] Make type arguments in lambdas bind a Span to the TyVarBinding or whatever for better error
+  messages.
 
 ## Reorganize Code
 - [ ] Split TypeCheckSpec into multiple files.

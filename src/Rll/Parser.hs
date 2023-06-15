@@ -1,4 +1,4 @@
-{-# LANGUAGE EmptyDataDeriving, OverloadedRecordDot #-}
+{-# LANGUAGE FunctionalDependencies #-}
 module Rll.Parser (
   Parser, decl, fileDecls, tm, ty, RllParseError(..),
 ) where
@@ -26,6 +26,47 @@ instance ShowErrorComponent RllParseError where
 
 type Parser = Parsec RllParseError Text
 
+spanBetween :: SourcePos -> SourcePos -> Span
+spanBetween (SourcePos filePath sl sc) (SourcePos _ el ec) =
+  Span filePath (unPos sl) (unPos sc) (unPos el) (unPos ec)
+
+spanTo :: Spans a => SourcePos -> a -> Span
+spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = unPos sl, startColumn = unPos sc}
+
+spanFrom :: Spans a => a -> SourcePos -> Span
+spanFrom sp (SourcePos _ el ec) = (getSpan sp) {endLine=unPos el, endColumn = unPos ec}
+
+spanFromTo :: (Spans a, Spans b) => a -> b -> Span
+spanFromTo start end = f (getSpan start) (getSpan end) where
+  f s Span{..} = s{endLine=endLine, endColumn=endColumn}
+
+class FromTo a b where
+  fromTo :: a -> b -> Span
+
+instance {-# OVERLAPPING #-} FromTo SourcePos SourcePos where
+  fromTo = spanBetween
+
+instance (Spans a) => FromTo SourcePos a where
+  fromTo = spanTo
+
+instance (Spans a) => FromTo a SourcePos where
+  fromTo = spanFrom
+
+instance {-# OVERLAPPABLE #-} (Spans a, Spans b) => FromTo a b where
+  fromTo = spanFromTo
+
+class NeedSpan w f | w -> f where
+  provideSpan :: Span -> f w -> w
+
+instance NeedSpan Ty TyF where
+  provideSpan = Ty
+
+instance NeedSpan Tm TmF where
+  provideSpan = Tm
+
+wrap :: (NeedSpan w f, FromTo a b) => a -> b -> f w -> w
+wrap a b = provideSpan (a `fromTo` b)
+
 lineComment = L.skipLineComment "//"
 blockComment = L.skipBlockCommentNested "/*" "*/"
 
@@ -34,17 +75,6 @@ space = L.space C.space1 lineComment blockComment
 
 lexeme :: Parser a -> Parser a
 lexeme = L.lexeme space
-
-spanBetween :: SourcePos -> SourcePos -> Span
-spanBetween (SourcePos filePath sl sc) (SourcePos _ el ec) =
-  Span filePath (unPos sl) (unPos sc) (unPos el) (unPos ec)
-
-wrapSpan :: Parser (Span -> a) -> Parser a
-wrapSpan m = do
-  s1 <- getSourcePos
-  v <- m
-  s2 <- getSourcePos
-  pure $ v $ spanBetween s1 s2
 
 validateForKeywords :: Parser Text -> Parser Text
 validateForKeywords m = do
@@ -56,7 +86,6 @@ validateForKeywords m = do
 
 mkVarParser :: Parser Char -> Parser Text
 mkVarParser m = validateForKeywords $ T.cons <$> m <*> takeWhileP Nothing Char.isAlphaNum
--- mkVarParser m = validateForKeywords $ fmap T.pack $ (:) <$> m <*> many C.alphaNumChar
 
 rawUpperText :: Parser Text
 rawUpperText = mkVarParser C.upperChar
@@ -83,13 +112,13 @@ mkSVarParser m = lexeme do
 upperSVar = label "Uppercase variable" $ mkSVarParser rawUpperText
 lowerSVar = label "Lowercase variable" $ mkSVarParser rawLowerText
 
-varPredUtil :: Parser () -> (Var -> Span -> a) -> Parser a
+varPredUtil :: (NeedSpan w f) => Parser () -> (Var -> f w) -> Parser w
 varPredUtil pred f = lexeme do
   s1 <- getSourcePos
   pred
   txt <- rawLowerText
   s2 <- getSourcePos
-  pure $ f (Var txt) $ spanBetween s1 s2
+  pure $ wrap s1 s2 $ f (Var txt)
 
 keyword :: Text -> Parser ()
 keyword txt = void $ L.symbol space txt
@@ -104,7 +133,6 @@ barw = keyword "|"
 arroww = keyword "->"
 colonw = keyword ":"
 funw = keyword "\\"
-polyw = keyword "^"
 copyw = keyword "copy"
 refw = keyword "&"
 dropw = keyword "drop"
@@ -118,16 +146,6 @@ recw = keyword "rec"
 
 keywords :: [Text]
 keywords = ["let", "in", "case", "copy", "drop", "rec", "enum", "forall", "struct", "of"]
-
-spanTo :: Spans a => SourcePos -> a -> Span
-spanTo (SourcePos _ sl sc) sp = (getSpan sp) {startLine = unPos sl, startColumn = unPos sc}
-
-spanFrom :: Spans a => a -> SourcePos -> Span
-spanFrom sp (SourcePos _ el ec) = (getSpan sp) {endLine=unPos el, endColumn = unPos ec}
-
-spanFromTo :: (Spans a, Spans b) => a -> b -> Span
-spanFromTo start end = f (getSpan start) (getSpan end) where
-  f s Span{..} = s{endLine=endLine, endColumn=endColumn}
 
 mkParens :: Parser a -> Parser a
 mkParens = between (keyword "(") (keyword ")")
@@ -168,10 +186,10 @@ ty = do
       C.char '>'
       space
       t2 <- ty
-      pure $ FunTy m t1 lts t2 $ t1 `spanFromTo` t2
+      pure $ wrap t1 t2 $ FunTy m t1 lts t2
     tyApp t1 = branch "type operator arguments" do
       args <- some simpleTy
-      let f t1 t2 = TyApp t1 t2 $ t1 `spanFromTo` t2
+      let f t1 t2 = wrap t1 t2 $ TyApp t1 t2
       pure $ foldl' f t1 args
 
 ltJoin :: Parser Ty
@@ -183,7 +201,7 @@ ltJoin = branch "lifetime join" do
   C.char ']'
   s2 <- getSourcePos
   space
-  pure $ LtJoin ltParts $ spanBetween s1 s2
+  pure $ wrap s1 s2 $ LtJoin ltParts
 
 -- | A type that cannot be a type application or type function unless those are
 -- in parentheses.
@@ -195,26 +213,26 @@ simpleTy = choice [univTy, tyVar, tyCon, ltOf, ltJoin, refTy, parenTy] where
       name <- rawLowerText
       s2 <- getSourcePos
       space
-      pure $ TyVar (MkTyVar name 0) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ TyVar (MkTyVar name 0)
     tyCon = branch "type constructor" do
       s1 <- getSourcePos
       name <- rawUpperText
       s2 <- getSourcePos
       space
-      pure $ TyCon (Var name) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ TyCon (Var name)
     ltOf = branch "variable lifetime" do
       s1 <- getSourcePos
       C.char '\''
       name <- rawLowerText
       s2 <- getSourcePos
       space
-      pure $ LtOf (Var name) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ LtOf (Var name)
     refTy = branch "reference type" do
       s1 <- getSourcePos
       refw
       t1 <- simpleTy
       t2 <- simpleTy
-      pure $ RefTy t1 t2 $ s1 `spanTo` t2
+      pure $ wrap s1 t2 $ RefTy t1 t2
     univTy = branch "polymorphic type" do
       s1 <- getSourcePos
       forallw
@@ -226,7 +244,7 @@ simpleTy = choice [univTy, tyVar, tyCon, ltOf, ltJoin, refTy, parenTy] where
       k <- kindp
       dotw
       outTy <- ty
-      pure $ Univ m lts (TyVarBinding tyVarName) k outTy $ s1 `spanTo` outTy
+      pure $ wrap s1 outTy $ Univ m lts (TyVarBinding tyVarName) k outTy
 
 tm :: Parser Tm
 tm = fullTm
@@ -234,40 +252,42 @@ tm = fullTm
     fullTm = do
       t1 <- subTm
       anno t1 <|> apps t1 <|> pure t1
-    apps t1 = branch "argument applications" do
-      let tyArg = do
+    tyApps t1 = label "type applications" do
+      let tyArg tys = do
             C.char '['
             space
             t <- ty
             C.char ']'
-            s2 <- getSourcePos
+            s1 <- getSourcePos
             space
-            pure $ Right (t, s2)
-      args <- some $ tyArg <|> (Left <$> subTm)
-      space
-      let f l (Left r) = AppTm l r $ t1 `spanFromTo` r
-          f l (Right (r, s2)) = AppTy l r $ t1 `spanFrom` s2
+            tyArg (t:tys) <|> pure (wrap t1 s1 $ AppTy t1 $ t:tys)
+      tyArg []
+    termApps t1 = try $ label "term applications" do
+      args <- some subTm
+      let f l r = wrap t1 r $ AppTm l r
       pure $ foldl' f t1 args
+    apps t1 = do
+      t2 <- tyApps t1 <|> pure t1
+      termApps t2 <|> pure t2
     anno term = label "type annotation" do
       colonw
       termTy <- ty
-      pure $ Anno term termTy $ term `spanFromTo` termTy
+      pure $ wrap term termTy $ Anno term termTy
     subTm = choice [tmVar, paren, caseTm, letStruct, letVar,
-             tmCon, copy, refTm, drop, intLit, stringLit,
-             fixTm, funTm, poly]
+             tmCon, copy, refTm, drop, intLit, stringLit, funTm]
     paren = label "term parentheses" $ lexeme $ C.char '(' *> space *> tm <* C.char ')'
     intLit = label "integer literal" $ lexeme $ try do
       s1 <- getSourcePos
       isNeg <- isJust <$> optional (C.char '-')
       i <- L.decimal
       s2 <- getSourcePos
-      pure $ LiteralTm (IntLit (if isNeg then negate i else i)) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ LiteralTm (IntLit (if isNeg then negate i else i))
     stringLit = label "string literal" $ lexeme do
       s1 <- getSourcePos
       C.char '"'
       str <- manyTill L.charLiteral (C.char '"')
       s2 <- getSourcePos
-      pure $ LiteralTm (StringLit (T.pack str)) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ LiteralTm (StringLit (T.pack str))
     caseBranch = label "case branch" do
       barw
       con <- upperSVar
@@ -282,7 +302,7 @@ tm = fullTm
       ofw
       branches <- some caseBranch
       let (CaseBranch _ _ endTm) = last branches
-      pure $ Case val branches $ st `spanTo` endTm
+      pure $ wrap st endTm $ Case val branches
     letStruct = label "let struct" do
       st <- getSourcePos
       try $ letw *> lookAhead C.upperChar
@@ -292,7 +312,7 @@ tm = fullTm
       val <- tm
       inw
       body <- tm
-      pure $ LetStruct con vars val body $ st `spanTo` body
+      pure $ wrap st body $ LetStruct con vars val body
     letVar = label "let var" do
       st <- getSourcePos
       try $ letw *> lookAhead C.lowerChar
@@ -301,31 +321,34 @@ tm = fullTm
       val <- tm
       inw
       body <- tm
-      pure $ Let var val body $ st `spanTo` body
-    funAnno = (Just <$> (colonw *> ty)) <|> pure Nothing
+      pure $ wrap st body $ Let var val body
+    tyBinds = many do
+      keyword "["
+      bind <- TyVarBinding <$> lowerText
+      colonw
+      k <- kindp
+      keyword "]"
+      pure (bind, k)
+    argBareBind = (\v-> (v, Nothing)) <$> lowerSVar
+    argTyBind = do
+      keyword "("
+      argVar <- lowerSVar
+      colonw
+      argTy <- ty
+      keyword ")"
+      pure (argVar, Just argTy)
     funTm = label "term function" do
       st <- getSourcePos
+      fixFun <- optional $ recw *> lowerSVar
       funw
-      arg <- lowerSVar
-      anno <- funAnno
+      polyB <- tyBinds
+      argB <- some $ argTyBind <|> argBareBind
       arroww
       body <- tm
-      pure $ FunTm arg anno body $ st `spanTo` body
-    poly = label "polymorphism term" do
-      st <- getSourcePos
-      polyw
-      let pbind = try do
-            bind <- TyVarBinding <$> lowerText
-            colonw
-            k <- kindp
-            dotw
-            pure $ Just (bind, k)
-      mbBind <- pbind <|> pure Nothing
-      body <- tm
-      pure $ Poly mbBind body $ st `spanTo` body
+      pure $ wrap st body $ FunTm fixFun polyB argB body
     tmVar = label "term variable" $ try do
       (SVar v s) <- lowerSVar
-      pure $ TmVar v s
+      pure $ Tm s $ TmVar v
     copy = label "copy" $ varPredUtil copyw Copy
     refTm = label "term reference" $ varPredUtil refw RefTm
     tmCon = branch "enum constructor" do
@@ -333,21 +356,14 @@ tm = fullTm
       name <- rawUpperText
       s2 <- getSourcePos
       space
-      pure $ TmCon (Var name) $ spanBetween s1 s2
+      pure $ wrap s1 s2 $ TmCon (Var name)
     drop = label "drop" do
       s1 <- getSourcePos
       dropw
       var <- lowerSVar
       inw
       body <- tm
-      pure $ Drop var body $ s1 `spanTo` body
-    fixTm = label "recursive function" do
-      s1 <- getSourcePos
-      recw
-      funVar <- lowerSVar
-      arroww
-      body <- tm
-      pure $ FixTm funVar body $ s1 `spanTo` body
+      pure $ wrap s1 body $ Drop var body
 
 decl :: Parser Decl
 decl = choice [funDecl, enumDecl, structDecl] where

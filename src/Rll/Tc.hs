@@ -69,39 +69,39 @@ lookupDataType v s = do
     Nothing -> throwError $ UnknownDataType v s
     Just dt -> pure dt
 
-lookupDataCon :: Var -> Span -> Tc Ty
+lookupDataCon :: Var -> Span -> Tc (DataType, Ty)
 lookupDataCon v s = do
-  m <- gets (.moduleTerms)
+  m <- gets (.moduleDataCons)
   case M.lookup v m of
     Nothing -> throwError $ UnknownDataCon v s
-    Just ty -> pure ty
+    Just (dt, ty) -> pure (dt, ty)
 
 -- | Get the kind of the type. Also checks that the type is well formed.
 kindOf :: Ty -> Tc Kind
-kindOf ty = case ty of
-  TyVar tv s -> lookupKind tv s
-  TyCon name s -> lookupDataType name s >>= \case
+kindOf ty@Ty{span=s, tyf} = case tyf of
+  TyVar tv -> lookupKind tv s
+  TyCon name -> lookupDataType name s >>= \case
     StructType _ tyParams _ _ -> pure $ kindFrom tyParams
     BuiltinType _ tyParams -> pure $ kindFrom tyParams
-    EnumType tyParams _ _ -> pure $ kindFrom tyParams
-  LtOf v s -> lookupEntry v s *> pure LtKind
-  FunTy _ aTy lts bTy _ -> do
+    EnumType _ tyParams _ _ -> pure $ kindFrom tyParams
+  LtOf v -> lookupEntry v s *> pure LtKind
+  FunTy _ aTy lts bTy -> do
     kindCheck TyKind aTy
     kindCheck LtKind lts
     kindCheck TyKind bTy
     pure TyKind
-  LtJoin tys _ -> do
+  LtJoin tys -> do
     forM_ tys (kindCheck LtKind)
     pure LtKind
-  RefTy lt aTy _ -> do
+  RefTy lt aTy -> do
     kindCheck LtKind lt
     kindCheck TyKind aTy
     pure TyKind
-  Univ _ lts _ tyVarKind bodyTy _ -> do
+  Univ _ lts _ tyVarKind bodyTy -> do
     kindCheck LtKind lts
     withKind tyVarKind $ kindCheck TyKind bodyTy
     pure TyKind
-  TyApp ty1 ty2 s -> do
+  TyApp ty1 ty2 -> do
     k1 <- kindOf ty1
     case k1 of
       TyOpKind ak bk -> do
@@ -122,19 +122,14 @@ kindCheck k ty = do
 -- | Used to implement checkForRank2 and `checkForPoly`.
 checkTyForm :: (Ty -> TyErr) -> Bool -> Ty -> Tc ()
 checkTyForm err = go False where
-  go polyInRet activateErr ty = case ty of
-    TyVar _ _ -> pure ()
-    TyCon _ _ -> pure ()
-    LtOf _ _ -> pure ()
-    LtJoin _ _ -> pure ()
-    RefTy _ aTy _ -> f aTy
-    FunTy _ aTy lts bTy _ ->
+  go polyInRet activateErr ty@Ty{tyf} = case tyf of
+    FunTy _ aTy lts bTy ->
       go polyInRet True aTy *> go polyInRet activateErr bTy
-    Univ _ lts _ tyVarKind bodyTy _
+    Univ _ lts _ tyVarKind bodyTy
       | activateErr -> throwError $ err ty
       | polyInRet -> throwError $ NoPolyInRet ty
       | otherwise -> f bodyTy
-    TyApp aTy bTy _ -> f aTy *> f bTy
+    _ -> mapM_ f tyf
     where f = go polyInRet activateErr
 
 -- | Throw an error if the type is a rank 2 type.
@@ -159,49 +154,49 @@ addDataType :: Var -> DataType -> Tc ()
 addDataType tyName dt = do
   ctx <- get
   (terms, s) <- case dt of
-    EnumType tyArgs caseM s -> pure $ (f s tyArgs <$> M.toList caseM, s)
+    EnumType _ tyArgs caseM s -> pure $ (f s tyArgs <$> M.toList caseM, s)
     StructType v tyArgs args s -> pure $ ([f s tyArgs (v,args)], s)
     BuiltinType _ _ -> throwError $
       CompilerLogicError "Cannot add a built-in type to the context" Nothing
   case M.lookup tyName ctx.dataTypes of
     Just _ -> throwError $ DataTypeAlreadyExists tyName s
     Nothing -> pure ()
-  terms' <- forM terms \(v,ty) -> (v,) <$> indexTyVars ty
-  forM_ terms' \(v,ty) -> case M.lookup v ctx.moduleTerms of
+  terms' <- forM terms \(v,ty) -> (\ty -> (v, (dt,ty))) <$> indexTyVars ty
+  forM_ terms' \(v,_) -> case M.lookup v ctx.moduleDataCons of
     Just _ -> throwError $ DefAlreadyExists v s
     Nothing -> pure ()
   put $ ctx
-    { moduleTerms = foldl' (flip $ uncurry M.insert) ctx.moduleTerms terms'
+    { moduleDataCons = foldl' (flip $ uncurry M.insert) ctx.moduleDataCons terms'
     , dataTypes = M.insert tyName dt ctx.dataTypes
     }
-  forM_ terms' $ check . snd
+  forM_ terms' $ check . snd . snd
   where
     check ty = do
       kindCheck TyKind ty
       checkForPoly ty
     f :: Span -> [TypeParam] -> (Text, [Ty]) -> (Var, Ty)
     f s tyArgs (name, args) = (Var name, result) where
-      finalTy = foldl' g (TyCon tyName s) $ zip tyArgs [0..] where
-        g base (TypeParam{name},i) = TyApp base (TyVar (MkTyVar name i) s) s
+      finalTy = foldl' g (Ty s $ TyCon tyName) $ zip tyArgs [0..] where
+        g base (TypeParam{name},i) = Ty s $ TyApp base (Ty s $ TyVar (MkTyVar name i))
       result = buildArgs s tyArgs $ buildTy s finalTy $ reverse args
     buildArgs :: Span -> [TypeParam] -> Ty -> Ty
     buildArgs s tyArgs body = foldr f body tyArgs where
-      f (TypeParam{name, kind}) body = Univ Many (LtJoin [] s) (TyVarBinding name) kind body s
+      f (TypeParam{name, kind}) body = Ty s $ Univ Many (Ty s $ LtJoin []) (TyVarBinding name) kind body
     buildTy :: Span -> Ty -> [Ty] -> Ty
     buildTy s ty [] = ty
-    buildTy s result [input] = FunTy Many input (LtJoin [] s) result s
+    buildTy s result [input] = Ty s $ FunTy Many input (Ty s $ LtJoin []) result
     buildTy s result (input:args) = buildTy s fTy args
-      where fTy = FunTy Single input (LtJoin [] s) result s
+      where fTy = Ty s $ FunTy Single input (Ty s $ LtJoin []) result
 
 -- NOTE: abstract out the "insert if it doesn't already exist" pattern.
 
 addModuleFun :: Span -> Var -> Ty -> Tc ()
 addModuleFun s name ty = do
   ctx <- get
-  case M.lookup name ctx.moduleTerms of
+  case M.lookup name ctx.moduleFuns of
     Just _ -> throwError $ DefAlreadyExists name s
     Nothing -> pure ()
-  put $ ctx {moduleTerms=M.insert name ty ctx.moduleTerms}
+  put $ ctx {moduleFuns=M.insert name ty ctx.moduleFuns}
 
 alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
 alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f) v
@@ -231,19 +226,27 @@ deleteVar v s = modify' \c ->
   where addDropLoc (s1,_) = (s1, Just s)
 
 -- | Utility function to add and drop kinds from the type context automatically.
-withKind :: Kind -> Tc a -> Tc a
-withKind k m = do
+withKinds :: [Kind] -> Tc a -> Tc a
+withKinds [] m = m
+withKinds ks m = do
   ctx <- get
   let tvList = ctx.localTypeVars
-  let shiftedTermVars = shiftTermTypes 1 ctx.termVars
-  put $ ctx { termVars=shiftedTermVars, localTypeVars=k:tvList }
+      kindLen = length ks
+      shiftedTermVars = shiftTermTypes kindLen ctx.termVars
+  put $ ctx { termVars=shiftedTermVars, localTypeVars=ks <> tvList }
   val <- m
   ctx2 <- get
-  let unshiftedTermVars = shiftTermTypes (-1) ctx2.termVars
-  unless (k:tvList == ctx2.localTypeVars) $ error "failed to drop a type variable"
+  let unshiftedTermVars = shiftTermTypes (-kindLen) ctx2.termVars
+  unless (ks <> tvList == ctx2.localTypeVars) $ error "failed to drop a type variable"
   put $ ctx2{termVars=unshiftedTermVars, localTypeVars=tvList}
   pure val
   where shiftTermTypes i = M.map (second $ rawTypeShift i 0)
+
+-- | Utility function to add and drop kinds from the type context automatically.
+--
+-- Specialized version of `withKinds` that only takes one kind.
+withKind :: Kind -> Tc a -> Tc a
+withKind k = withKinds [k]
 
 -- | Get a list of explicitly mentioned variables in the lifetime.
 -- Ignores lifetime variables.
@@ -262,20 +265,21 @@ ltSetToVars = mapMaybe f . fmap snd . S.toList where
 -- | Convert a lifetime set to a list of the lifetimes.
 ltSetToTypes :: LtSet -> [Ty]
 ltSetToTypes ltSet = fmap f $ S.toList ltSet where
-  f (s, Left x) = TyVar x s
-  f (s, Right v) = LtOf v s
+  f (s, Left x) = Ty s $ TyVar x
+  f (s, Right v) = Ty s $ LtOf v
 
 -- | Get a set of all unique variables and lifetime variables mentioned in
 -- the lifetime. This is the most granular set of lifetimes.
 lifetimeSet :: Ty -> Tc LtSet
-lifetimeSet (LtOf v s) = pure $ S.singleton $ (s, Right v)
-lifetimeSet (LtJoin ls s) = S.unions <$> traverse lifetimeSet ls
-lifetimeSet ty@(TyVar x s) = do
-  k <- lookupKind x s
-  case k of
-    LtKind -> pure $ S.singleton $ (s, Left x)
-    _ -> throwError $ ExpectedKind LtKind k s
-lifetimeSet ty = throwError $ ExpectedKind LtKind TyKind $ getSpan ty
+lifetimeSet Ty{span, tyf} = case tyf of
+  LtOf v -> pure $ S.singleton $ (span, Right v)
+  LtJoin ls -> S.unions <$> traverse lifetimeSet ls
+  TyVar x -> do
+    k <- lookupKind x span
+    case k of
+      LtKind -> pure $ S.singleton $ (span, Left x)
+      _ -> throwError $ ExpectedKind LtKind k span
+  _ -> throwError $ ExpectedKind LtKind TyKind span
 
 -- | Get a set of all lifetimes mentioned in a type relative to the context.
 --
@@ -283,17 +287,13 @@ lifetimeSet ty = throwError $ ExpectedKind LtKind TyKind $ getSpan ty
 -- in the type.
 ltsInTy :: Ctx -> Ty -> LtSet
 ltsInTy ctx typ = S.fromList $ f typ [] where
-  f ty l = case ty of
-    LtOf v s -> (s, Right v ):l
-    TyVar tv s -> case getKind tv of
-      LtKind -> (s, Left tv ):l
+  f Ty{span=s, tyf} l = case tyf of
+    LtOf v -> (s, Right v):l
+    TyVar tv -> case getKind tv of
+      LtKind -> (s, Left tv):l
       TyKind -> l
       TyOpKind _ _ -> l
-    RefTy t1 t2 _ -> f t1 $ f t2 l
-    LtJoin tys _ -> foldl' (flip f) l tys
-    FunTy _ t1 t2 t3 _ -> f t2 l
-    Univ _ t1 _ _ t2 _ -> f t1 l
-    _ -> l
+    _ -> foldr f l tyf
   getKind (MkTyVar _ i) = case atMay ctx.localTypeVars i of
     Just k -> k
     Nothing -> error "Should have been caught already"
@@ -305,26 +305,14 @@ ltsInTy ctx typ = S.fromList $ f typ [] where
 ltsBorrowedIn :: Ctx -> Tm -> LtSet
 ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
   -- | `i` is the threshold counter used for telling which type variable is local.
-  g i tm l = case tm of
-    Case arg branches _ -> f arg $ foldl' (\l' (CaseBranch _ _ body) -> f body l') l branches
-    LetStruct _ _ t1 t2 _ -> f t2 $ f t1 l
-    Let _ t1 t2 _ -> f t2 $ f t1 l
-    FunTm _ _ t1 _ -> f t1 l
-    Poly _ t1 _ -> g (i+1) t1 l
-    TmVar _ _ -> l
-    TmCon _ _ -> l
-    LiteralTm _ _ -> l
-    Copy v s -> case M.lookup v ctx.termVars of
-      Just (_,RefTy (LtOf v _) _ _) | M.member v ctx.termVars -> (s, Right v ):l
-      Just (_,RefTy (TyVar x@(MkTyVar _ i') _) _ _) | i' >= i -> (s, Left x ):l
+  g i tm@Tm{span=s, tmf} l = case tmf of
+    FunTm fix polyB argB t1 -> g (i + length polyB) t1 l
+    Copy v -> case M.lookup v ctx.termVars of
+      Just (_, Ty _ (RefTy (Ty _ (LtOf v)) _)) | M.member v ctx.termVars -> (s, Right v ):l
+      Just (_, Ty _ (RefTy (Ty _ (TyVar x)) _)) | x.index >= i -> (s, Left x ):l
       _ -> l
-    RefTm v s -> if M.member v ctx.termVars then (s, Right v ):l else l
-    AppTy t1 _ _ -> f t1 l
-    Drop _ t1 _ -> f t1 l
-    AppTm t1 t2 _ -> f t2 $ f t1 l
-    FixTm _ t1 _ -> f t1 l
-    Anno t1 _ _ -> f t1 l
-    where f = g i
+    RefTm v -> if M.member v ctx.termVars then (s, Right v ):l else l
+    _ -> foldr (g i) l tmf
 
 -- | Infer the lifetimes mentioned in the types of all consumed values.
 ltsInConsumed :: Ctx -> Ctx -> LtSet
@@ -348,14 +336,9 @@ incrementLts = adjustLts (+1)
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
-isTyBorrowing v1 ty = case ty of
-  LtOf v _ -> v == v1
-  RefTy t1 t2 _ -> f t1 || f t2
-  LtJoin tys _ -> any f tys
-  FunTy _ t1 t2 t3 _ -> f t1 || f t2 || f t3
-  Univ _ t1 _ _ t2 _ -> f t1 || f t2
-  _ -> False
-  where f = isTyBorrowing v1
+isTyBorrowing v1 Ty{tyf} = case tyf of
+  LtOf v -> v == v1
+  _ -> or $ isTyBorrowing v1 <$> tyf
 
 -- | Get a list of all variables that reference the argument
 -- in their type.
@@ -373,10 +356,10 @@ dropVar v s = do
   unless (borrowCount == 0) $ do
     borrowers <- variablesBorrowing v
     throwError $ CannotDropBorrowedVar v borrowers s
-  case ty of
-    RefTy l _ _ -> decrementLts l
-    Univ Many l _ _ _ _ -> decrementLts l
-    FunTy Many _ l _ _ -> decrementLts l
+  case ty.tyf of
+    RefTy l _ -> decrementLts l
+    Univ Many l _ _ _ -> decrementLts l
+    FunTy Many _ l _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
   deleteVar v s
 
@@ -384,8 +367,8 @@ dropVar v s = do
 -- when we consume a reference term.
 useRef :: Ty -> Tc ()
 useRef ty = do
-  case ty of
-    RefTy l _ _ -> decrementLts l
+  case ty.tyf of
+    RefTy l _ -> decrementLts l
     -- NOTE: figure out why this doesn't need to decrement function lts borrows and
     -- write a test.
     -- OLD: This should be decrementing function borrows right?
@@ -393,35 +376,27 @@ useRef ty = do
 
 -- | Used to increment borrow counts if the return of a function increments them.
 incRef :: Ty -> Tc ()
-incRef ty = case ty of
-  RefTy l _ _ -> incrementLts l
-  FunTy _ _ lts _ _ -> incrementLts lts
-  Univ _ lts _ _ _ _ -> incrementLts lts
+incRef ty = case ty.tyf of
+  RefTy l _ -> incrementLts l
+  FunTy _ _ lts _ -> incrementLts lts
+  Univ _ lts _ _ _ -> incrementLts lts
   _ -> pure ()
 
 rawTypeShift :: Int -> Int -> Ty -> Ty
-rawTypeShift i c ty = case ty of
-  TyVar (MkTyVar t n) s -> TyVar (MkTyVar t $ if n < c then n else n+i) s
-  FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
-  LtJoin ts s -> LtJoin (f <$> ts) s
-  RefTy a b s -> RefTy (f a) (f b) s
-  Univ m lts v k body s -> Univ m (f lts) v k (rawTypeShift i (c+1) body) s
-  _ -> ty
+rawTypeShift i c ty@Ty{span=s, tyf} = Ty s $ case tyf of
+  TyVar (MkTyVar t n) -> TyVar (MkTyVar t $ if n < c then n else n+i)
+  Univ m lts v k body -> Univ m (f lts) v k (rawTypeShift i (c+1) body)
+  _ -> f <$> tyf
   where f = rawTypeShift i c
 
 typeShift :: Ty -> Ty
 typeShift = rawTypeShift 1 0
 
 rawTypeSub :: Int -> Ty -> Ty -> Ty
-rawTypeSub xi arg target = case target of
-  TyVar v@(MkTyVar _ vi) s -> if vi == xi then arg else TyVar v s
-  FunTy m a b c s -> FunTy m (f a) (f b) (f c) s
-  LtJoin ts s -> LtJoin (f <$> ts) s
-  RefTy a b s -> RefTy (f a) (f b) s
-  Univ m lts v k body s -> Univ m (f lts) v k (rawTypeSub (xi+1) (rawTypeShift 1 0 arg) body) s
-  TyApp a b s -> TyApp (f a) (f b) s
-  TyCon _ _ -> target
-  LtOf _ _ -> target
+rawTypeSub xi arg target@Ty{span=s, tyf} = case tyf of
+  TyVar v@(MkTyVar _ vi) -> if vi == xi then arg else Ty s $ TyVar v
+  Univ m lts v k body -> Ty s $ Univ m (f lts) v k (rawTypeSub (xi+1) (rawTypeShift 1 0 arg) body)
+  _ -> Ty s $ f <$> tyf
   where f = rawTypeSub xi arg
 
 -- | Do type substitution on the body of a Univ type.
@@ -436,32 +411,16 @@ typeSub = rawTypeSub 0
 -- beneath and then a map of at which binder a variable is introduced.
 -- Then we just take the difference to get the de-brujin index.
 rawIndexTyVars :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
-rawIndexTyVars i idxMap typ = case typ of
-  TyVar tv@(MkTyVar name _) s -> case M.lookup name idxMap of
-    Just i' -> pure $ TyVar (MkTyVar name $ i-i') s
+rawIndexTyVars i idxMap typ@Ty{span=s, tyf} = fmap (Ty s) $ case tyf of
+  TyVar tv@(MkTyVar name _) -> case M.lookup name idxMap of
+    Just i' -> pure $ TyVar (MkTyVar name $ i-i')
     Nothing -> throwError $ UnknownTypeVar tv s
-  FunTy m aTy lts bTy s -> do
-    aTy' <- f' aTy
-    lts' <- f' lts
-    bTy' <- f' bTy
-    pure $ FunTy m aTy' lts' bTy' s
-  LtJoin tys s -> do
-    tys' <- traverse f' tys
-    pure $ LtJoin tys' s
-  RefTy lt aTy s -> do
-    lt' <- f' lt
-    aTy' <- f' aTy
-    pure $ RefTy lt' aTy' s
-  Univ m lts bind@(TyVarBinding name) k bodyTy s -> do
+  Univ m lts bind@(TyVarBinding name) k bodyTy -> do
     lts' <- f' lts
     let idxMap' = M.insert name (i+1) idxMap
     bodyTy' <- rawIndexTyVars (i+1) idxMap' bodyTy
-    pure $ Univ m lts' bind k bodyTy' s
-  TyApp aTy bTy s -> do
-    aTy' <- f' aTy
-    bTy' <- f' bTy
-    pure $ TyApp aTy' bTy' s
-  _ -> pure typ
+    pure $ Univ m lts' bind k bodyTy'
+  _ -> traverse f' tyf
   where f' = rawIndexTyVars i idxMap
 
 -- | Creates de-brujin indices for the type variables.
@@ -473,51 +432,23 @@ indexTyVars = rawIndexTyVars 0 M.empty
 indexTyVarsInTm :: Tm -> Tc Tm
 indexTyVarsInTm = g 0 M.empty where
   g :: Int -> M.HashMap Text Int -> Tm -> Tc Tm
-  g i idxMap term = case term of
-    Case arg branches s -> do
-      let fBranch (CaseBranch sv svs t1) = CaseBranch sv svs <$> f t1
-      arg' <- f arg
-      branches' <- traverse fBranch branches
-      pure $ Case arg' branches' s
-    LetStruct v vs t1 t2 s -> do
+  g i idxMap term@Tm{span=s, tmf} = fmap (Tm s) $ case tmf of
+    FunTm fix polyB argB t1 -> do
+      let add m (j, (TyVarBinding name, kind)) = M.insert name (i+j) m
+          idxMap' = foldl' add idxMap (zip [1..] polyB)
+          i' = i + length polyB
+          toArg (v, Just vTy) = (v,) . Just <$> rawIndexTyVars i' idxMap' vTy
+          toArg b = pure b
+      argB' <- mapM toArg argB
+      t1' <- g i' idxMap' t1
+      pure $ FunTm fix polyB argB t1'
+    AppTy t1 tys -> do
       t1' <- f t1
-      t2' <- f t2
-      pure $ LetStruct v vs t1' t2' s
-    Let v t1 t2 s -> do
-      t1' <- f t1
-      t2' <- f t2
-      pure $ Let v t1' t2' s
-    FunTm m mbAnno t1 s -> do
-      mbAnno' <- traverse (rawIndexTyVars i idxMap) mbAnno
-      t1' <- f t1
-      pure $ FunTm m mbAnno' t1' s
-    Poly mbAnno t1 s -> do
-      let idxMap' = case mbAnno of
-            Just (TyVarBinding name, _) -> M.insert name (i+1) idxMap
-            Nothing -> idxMap
-      t1' <- g (i+1) idxMap' t1
-      pure $ Poly mbAnno t1' s
-    AppTy t1 ty s -> do
+      tys' <- mapM (rawIndexTyVars i idxMap) tys
+      pure $ AppTy t1' tys'
+    Anno t1 ty -> do
       t1' <- f t1
       ty' <- rawIndexTyVars i idxMap ty
-      pure $ AppTy t1' ty' s
-    Drop v t1 s -> do
-      t1' <- f t1
-      pure $ Drop v t1' s
-    AppTm t1 t2 s -> do
-      t1' <- f t1
-      t2' <- f t2
-      pure $ AppTm t1' t2' s
-    FixTm fv t1 s -> do
-      t1' <- g (i+1) idxMap t1
-      pure $ FixTm fv t1' s
-    Anno t1 ty s -> do
-      t1' <- f t1
-      ty' <- rawIndexTyVars i idxMap ty
-      pure $ Anno t1' ty' s
-    TmVar _ _ -> pure term
-    TmCon _ _ -> pure term
-    Copy _ _ -> pure term
-    RefTm _ _ -> pure term
-    LiteralTm _ _ -> pure term
+      pure $ Anno t1' ty'
+    _ -> traverse f tmf
     where f = g i idxMap

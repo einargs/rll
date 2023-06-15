@@ -8,27 +8,20 @@ import Rll.Core
 import Rll.Tc (rawTypeSub)
 
 import Data.HashMap.Strict qualified as M
-import Data.IntMap.Strict qualified as IM
-import qualified Data.HashSet as S
 import Data.Text (Text)
-import Data.Text qualified as T
+-- import Data.Text qualified as T
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Data.List (foldl')
 import Control.Exception (assert)
 import Data.Hashable (Hashable(..))
 
-data ClosureEnv = ClosureEnv
-  { moved :: M.HashMap Var Ty
-  , referenced :: M.HashMap Var Ty
-  }
-
 data SpecDecl
-  = SpecFun ClosureEnv [(Var, Ty)] SpecIR
+  = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty)] SpecIR
   | Instantiate DataType [Ty]
 
 data SpecF a
-  = CaseSF a [(SVar, [SVar], a)]
+  = CaseSF a [CaseBranch a]
   | LetStructSF SVar [SVar] a a
   | LetSF SVar a a
   -- | Create an initial closure for a function.
@@ -36,22 +29,28 @@ data SpecF a
   -- The first hashset is variables that are moved into the closure.
   -- The second is variables that are referenced by it and will have
   -- their references put in the closure.
-  | ClosureSF MVar (S.HashSet Var) (S.HashSet Var)
+  | ClosureSF MVar ClosureEnv
+  -- | This is used to indicate that we're re-using the closure
+  -- environment for a recursive function call.
+  --
+  -- The second argument is the name of the variable holding
+  -- the recursive function reference and acts as an identifier.
+  | RecClosureSF MVar Var
   -- | Local variable.
   | VarSF Var
   -- NOTE maybe have information about the source data type here? I'd
   -- probably add that in when building `Core`.
-  | ConSF Var
+  -- | A data type constructor. Has the mangled name of the data type
+  -- and the name of the constructor.
+  | ConSF MVar Var
   | CopySF Var
-  -- | Used when a `RefCF` in a lambda refers to an external variable.
-  | ExtRefSF Var
   | RefSF Var
   | DropSF SVar a
-  | AppSF a a
+  | AppSF a [a]
   | LiteralSF Literal
   deriving (Show, Eq, Functor, Foldable, Traversable)
 
-data SpecIR = SpecIR {ty :: Ty, span :: Span, spec :: (SpecF SpecIR)}
+data SpecIR = SpecIR {ty :: Ty, span :: Span, specf :: (SpecF SpecIR)}
 
 -- | A mangled variable name.
 data MVar = MVar Var Text
@@ -60,22 +59,48 @@ data MVar = MVar Var Text
 instance Hashable MVar where
   hashWithSalt s (MVar v t) = s `hashWithSalt` v `hashWithSalt` t
 
-mangle :: Var -> [Ty] -> MVar
-mangle = undefined
+mangleDataType :: Var -> [Ty] -> MVar
+mangleDataType v tys = undefined
 
-data CoreLambda = CoreLambda ClosureEnv [(Var, Ty)] Core
+mangleFun :: Var -> [Ty] -> MVar
+mangleFun v tys = undefined
+
+mangleLambda :: MVar -> [Ty] -> Int -> MVar
+mangleLambda enclosingFun tys i = undefined
+
+data Lambda = PolyLambda
+  { fix :: Maybe SVar
+  , tyArgs :: [(TyVarBinding, Kind)]
+  , args :: [(SVar, Ty)]
+  , env :: ClosureEnv
+  , body :: Core
+  }
+  deriving Show
+
+-- | Various kinds of local functions that can exist
+-- in the context.
+data LocalFun
+  = PolyLF Int Lambda
+  | MonoLF MVar ClosureEnv
+  | TopLF Var
+  deriving Show
 
 data SpecCtx = SpecCtx
   { specDecls :: M.HashMap MVar SpecDecl
-  , lambdas :: M.HashMap Var CoreLambda
+  , enclosingFun :: MVar
+  -- | variables that refer to local functions.
+  , localFuns :: M.HashMap Var LocalFun
   , lambdaCounter :: Int
-  , dataTypes :: M.HashMap Var DataType
+  , coreDataTypes :: M.HashMap Var DataType
   , coreFuns :: M.HashMap Var Core
-  }
+  } deriving Show
 
 data SpecErr
   -- | Could not find the function in `coreFuns`.
   = NoCoreFun Var
+  -- | You must fully apply the type arguments to a polymorphic
+  -- function before you can use it as a first class value.
+  | MustSpec Span
 
 newtype Spec a = MkSpec { unSpec :: StateT SpecCtx (Except SpecErr) a }
   deriving (Functor, Applicative, Monad, MonadError SpecErr, MonadState SpecCtx)
@@ -97,10 +122,10 @@ typeSubInCore tyCtx = go 0 where
   -- type and instead building it based on structure of core and the types
   -- of descendants.
   go :: Int -> Core -> Core
-  go xi fullCore@Core{ty, span, core} = Core (goTy ty) span $ case core of
+  go xi core@Core{ty, span, coref} = Core (goTy ty) span $ case coref of
     AppTyCF t1 tys -> AppTyCF (f t1) $ goTy <$> tys
-    LamCF fix polyB argB t1 -> LamCF fix polyB (fmap goTy <$> argB) $ f t1
-    _ -> f <$> core
+    LamCF fix polyB argB env t1 -> LamCF fix polyB (fmap goTy <$> argB) env $ f t1
+    _ -> f <$> coref
     where
     -- Because the type arguments should have no type variables, we
     -- don't need to shift them.
@@ -108,76 +133,190 @@ typeSubInCore tyCtx = go 0 where
     goTy baseTy = foldl' g baseTy $ zip [0..] tyCtx
     f = go xi
 
-{-
--- | Transform a Core such that all type applications are done in one
--- place in a single operation.
-condenseAppTy :: Core -> Core
-condenseAppTy = go M.empty where
-  -- What do you do if you return a polymorphic function from an if
-  -- statement and then dynamically apply it?
+-- | Utility function that checks if a declaration already
+-- has been created. If it hasn't, it builds and registers
+-- it.
+guardDecl :: MVar -> Spec SpecDecl -> Spec MVar
+guardDecl mvar act = do
+  specDecls <- gets (.specDecls)
+  case M.lookup mvar specDecls of
+    Just _ -> pure ()
+    Nothing -> do
+      sd <- act
+      addSpecDecl mvar sd
+  pure mvar
 
-  -- | We take a map of a variable to a substitution for it.
-  -- This holds type applications that have already happened.
-  --
-  -- If we have a lambda that takes partial type arguments -- which
-  -- is an absurd edge case but legal -- then we delete the applications
-  -- from there and move them to instead happen where they're finished.
-  go :: M.HashMap Var [Ty] -> Core -> Core
-  go ctx fullCore@Core{core} = case core of
-    LetCF v t1 t2 -> case t1.ty of
-      Univ _ _ _ _ _ _ -> case t1.core of
-        AppTyCF lam@Core{core=LamCF _ _ _ _} tys ->
-          let ctx' = M.insert v $ Core lam.ty lam.span 
-          in LetCF v lam $ go (M.insert )
-      _ -> go ctx <$> core
-    _ -> go ctx <$> core
-  -}
+-- | Look up a local function from the context.
+lookupLocalFun :: Var -> Spec (Maybe LocalFun)
+lookupLocalFun v = M.lookup v <$> gets (.localFuns)
 
+-- TODO function for specializing a data type.
+specDataType :: DataType -> [Ty] -> Spec MVar
+specDataType = undefined
 
--- TODO function for specializing the body of functions
+-- | function for specializing the body of functions.
 specExpr :: Core -> Spec SpecIR
-specExpr fullCore@Core{core} = case core of
-  LetCF sv t1 t2 -> sf $ LetSF sv <$> specExpr t1 <*> specExpr t2
-  LamCF fix polyB argB body -> undefined
-  where sf = fmap $ SpecIR fullCore.ty fullCore.span
+specExpr core@Core{span, coref} = do
+  case core.ty.tyf of
+    Univ _ _ _ _ _ -> throwError $ MustSpec span
+    _ -> pure ()
+  case coref of
+    LetStructCF sv mems t1 t2 -> fmap sf $ LetStructSF sv mems <$> specExpr t1 <*> specExpr t2
+    ModuleVarCF v -> do
+      mvar <- specFunDef v []
+      pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
+    LocalVarCF v -> lookupLocalFun v >>= \case
+      Just _ -> sf <$> specLocalFun v []
+      Nothing -> pure $ sf $ VarSF v
+    RefCF v -> pure $ sf $ RefSF v
+    CopyCF v -> pure $ sf $ CopySF v
+    DropCF sv t1 -> fmap sf $ DropSF sv <$> specExpr t1
+    -- The `Imp` stage will work out the explict thunks when
+    -- partial application happens.
+    AppTmCF t1 args -> fmap sf $ AppSF <$> specExpr t1 <*> traverse specExpr args
+    LiteralCF lit -> pure $ sf $ LiteralSF lit
+    ConCF dt v -> do
+      mvar <- specDataType dt []
+      pure $ sf $ ConSF mvar v
+    CaseCF t1 branches -> fmap sf $ CaseSF <$>
+      specExpr t1 <*> traverse (traverse specExpr) branches
+    AppTyCF t1 tys -> case t1.coref of
+      -- Recursive functions should be picked up here as well.
+      LocalVarCF v -> fmap sf <$> specLambda v tys
+      ConCF dt var -> do
+        mvar <- specDataType dt tys
+        pure $ sf $ ConSF mvar var
+      ModuleVarCF v -> do
+        mvar <- specFunDef v tys
+        pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
+      LamCF fix polyB argB env body -> do
+        case fix of
+          fff
+      -- NOTE: how do we handle trying to specialize a reference?
+      -- I think that's automatically rejected?
+      _ -> error "Can't specialize this? Not certain if this can happen."
+    LetCF sv t1 t2 -> case t1.coref of
+      LamCF fix polyB argB env body
+        | polyB /= [] -> do
+            let poly = PolyLambda fix polyB argB env body
+            withPolyLambda sv.var poly $ specExpr t2
+      _ -> fmap sf $ LetSF sv <$> specExpr t1 <*> specExpr t2
+    LamCF fix [] argB env body -> do
+      mvar <- storeLambda fix argB env body
+      pure $ sf $ ClosureSF mvar env
+    LamCF _ polyB _ _ _ -> error "Should be caught by MustSpec at start"
+  where sf = SpecIR core.ty core.span
 
--- TODO function for registering a lambda.
--- TODO function for going off and specializing a separate function
--- TODO function for specializing a lambda.
-specLambda :: Var -> [Ty] -> Spec Var
-specLambda = undefined
+-- | Generate a fresh lambda name using `lambdaCounter`
+-- and the types used to specialize it.
+freshLambdaName :: [Ty] -> Spec MVar
+freshLambdaName tys = do
+  ctx <- get
+  put $ ctx{lambdaCounter=ctx.lambdaCounter+1}
+  pure $ mangleLambda ctx.enclosingFun tys ctx.lambdaCounter
 
-specFunDef :: Var -> [Ty] -> Spec ()
-specFunDef name tyArgs = do
+-- | Insert a SpecDecl.
+addSpecDecl :: MVar -> SpecDecl -> Spec ()
+addSpecDecl mvar sd = modify' \ctx ->
+  ctx{specDecls=M.insert mvar sd ctx.specDecls}
+
+-- | Store a non-polymorphic lambda in `specDecls`.
+storeLambda :: Maybe SVar -> [(SVar, Ty)] -> ClosureEnv -> Core -> Spec MVar
+storeLambda fix args env body = do
+  name <- freshLambdaName []
+  body' <- specExpr body
+  addSpecDecl name $ SpecFun env fix args body'
+
+-- | Register and unregister a lam
+withLocalFun :: Var -> LocalFun -> Spec a -> Spec a
+withLocalFun v lf act = do
+  entryLocals <- gets (.localFuns)
+  modify' \ctx -> ctx
+    {localFuns = M.insert v lf ctx.localFuns}
+  val <- act
+  modify' \ctx' -> ctx'{localFuns=entryLocals}
+  pure val
+
+-- | Register and unregister a polymorphic lambda function
+-- in the context.
+withPolyLambda :: Var -> Lambda -> Spec a -> Spec a
+withPolyLambda v lam@PolyLambda{fix} act = do
+  count <- gets (.lambdaCounter)
+  modify' \ctx -> ctx
+    {lambdaCounter = ctx.lambdaCounter + 1}
+  let localFun = PolyLF i lam
+      -- here we create a second entry for the recursive
+      -- function name pointing to the same `LocalFun`.
+      wrap = case fix of
+        Nothing -> id
+        Just sv -> withLocalFun sv.var localFun
+  withLocalFun v localFun $ wrap act
+
+-- | Convert the name of a local function into the appropriate
+-- call to a top level definition, specializing if necessary.
+specLocalFun :: Var -> [Ty] -> Spec (SpecF SpecIR)
+specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
+  Nothing -> error $ "Shouldn't be possible. Error in determining if "
+    <> "var is local vs module or in type checking."
+  Just localFun -> case localFun of
+    -- Since this lambda only has one version, we can just point to what's
+    -- already compiled
+    MonoLF mvar env -> pure $ RecClosureSF mvar env
+    -- This is just the name of a top level function.
+    TopLF v -> do
+      mvar <- specFunDef v tyArgs
+      pure $ ClosureSF mvar $ ClosureEnv M.empty
+    PolyLF i (PolyLambda fix polyB argB env bodyCore) -> do
+      enclosingFun <- gets (.enclosingFun)
+      let name = mangleLambda enclosingFun tyArgs i
+      guardDecl name do
+        let bodyCore' = typeSubInCore tyArgs bodyCore
+        body <- specExpr bodyCore'
+        pure $ SpecFun env fix argB body
+      pure $ ClosureSF name env
+
+-- | Specialize a call to a top level function definition.
+specFunDef :: Var -> [Ty] -> Spec MVar
+specFunDef name tyArgs = guardDecl mangledName do
   -- We save the lambdas we started with, and use a blank map for
   -- when we're specializing this function, since it's separate.
-  entryLambdas <- gets (.lambdas)
-  modify' \ctx -> ctx{lambdas=M.empty}
-  (args, coreBody) <- getBody <$> getCoreFun name
+  SpecCtx
+    { lambdas=entryLambdas
+    , enclosingFun=entryEnclosingFun
+    } <- get
+  modify' \ctx -> ctx{ lambdas=M.empty, enclosingFun=mangledName }
+  (fix, args, coreBody) <- getBody <$> getCoreFun name
   body <- specExpr coreBody
-  let mangledName = mangle name tyArgs
-      decl = SpecFun (ClosureEnv M.empty M.empty) args body
   modify' \ctx -> ctx
-    { specDecls = M.insert mangledName decl ctx.specDecls
-    , lambdas = entryLambdas
+    { lambdas = entryLambdas
+    , enclosingFun = entryEnclosingFun
     }
+  pure $ SpecFun (ClosureEnv M.empty) fix args body
   where
-  getBody :: Core -> ([(Var, Ty)], Core)
-  getBody fullCore@Core{core} = case core of
-    LamCF fix polyB argB body ->
-      let f (v,ty) = (v.var, ty)
-          body' = typeSubInCore tyArgs body
-      in assert (length polyB == length tyArgs) (f <$> argB, body')
-    _ -> ([], fullCore)
+  mangledName = mangleFun name tyArgs
+  getBody :: Core -> (Maybe SVar, [(SVar, Ty)], Core)
+  getBody fullCore@Core{coref} = case coref of
+    LamCF fix polyB argB (ClosureEnv env) body ->
+      -- Top level Function definitions should never be able
+      -- to capture environment variables.
+      assert (env == M.empty) $
+      let body' = typeSubInCore tyArgs body
+      in assert (length polyB == length tyArgs) (fix, argB, body')
+    _ -> (Nothing, [], fullCore)
 
+-- | Specialize a core module.
+--
+-- Uses an unspecialized main function as an entry point.
 specModule :: M.HashMap Var DataType -> [(Var, Core)] ->
   Either SpecErr (M.HashMap MVar SpecDecl)
 specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
   where
   ctx = SpecCtx
     { specDecls = M.empty
-    , dataTypes = dataTypes
+    , coreDataTypes = dataTypes
     , coreFuns = M.fromList coreFuns
     , lambdas = M.empty
+    , lambdaCounter = 0
+    , enclosingFun = error "Should be overriden by specFunDef"
     }
   run spec = fmap ((.specDecls) . snd) $ runExcept $ flip runStateT ctx $ unSpec spec

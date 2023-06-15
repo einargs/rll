@@ -172,11 +172,16 @@ data TyErr
   | NoPolyInField Ty
   -- | Cannot return a polymorphic function.
   | NoPolyInRet Ty
-  -- | Cannot wrap a fix expression around another
-  -- fix expression.
+  -- | Polymorphic type arguments were only partially listed in function
+  -- definition. They must all be present or all be omitted.
+  | PartialTyArgsInLam Ty Span
+  -- | You are missing arguments in this lambda definition.
+  | PartialArgsInLam Ty Span
+  -- | When specializing a polymorphic function you must fully apply
+  -- the type arguments.
   --
-  -- Span is for enclosing fix statement.
-  | OnlyOneFix Span
+  -- Type left over, span of type app.
+  | NotFullyApplied Ty Span
   deriving (Eq, Show)
 
 tpretty :: P.Pretty a => a -> Text

@@ -201,9 +201,9 @@ data TmF a
   | TmCon Var
   | Copy Var
   | RefTm Var
-  | AppTy a Ty
+  | AppTy a [Ty]
   | Drop SVar a
-  | AppTm a
+  | AppTm a a
   | Anno a Ty
   | LiteralTm Literal
   deriving (Show, Eq, Functor, Foldable, Traversable)
