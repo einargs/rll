@@ -70,7 +70,7 @@ library
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
-  ghc-options: -Wincomplete-patterns -fwarn-unused-imports
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
@@ -127,7 +127,7 @@ executable rll-exe
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
-  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2
@@ -153,6 +153,7 @@ test-suite rll-test
   main-is: Spec.hs
   other-modules:
       QuoteTxt
+      Rll.AstUtil
       Rll.ParserSpec
       Rll.TcSpecUtil
       Rll.TypeCheckSpec
@@ -190,7 +191,7 @@ test-suite rll-test
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
-  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -threaded -rtsopts -with-rtsopts=-N
+  ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
       base >=4.7 && <5
     , containers >=0.6.2

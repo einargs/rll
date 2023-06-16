@@ -175,8 +175,9 @@ data TyErr
   -- | Polymorphic type arguments were only partially listed in function
   -- definition. They must all be present or all be omitted.
   | PartialTyArgsInLam Ty Span
-  -- | You are missing arguments in this lambda definition.
-  | PartialArgsInLam Ty Span
+  -- | You defined too many arguments for this lambda compared to the
+  -- type it is being checked against.
+  | TooManyArgsInLam Ty Span
   -- | When specializing a polymorphic function you must fully apply
   -- the type arguments.
   --
@@ -372,6 +373,9 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
     UnknownDataType name s -> spanMsg s $ ptext $ "Unknown data type" <+> P.pretty name
 
     UnknownTypeVar name s -> spanMsg s $ ptext $ "Unknown type variable" <+> P.pretty name
+
+    ExpectedKind ek ie s -> spanMsg s $ ptext $ P.fillSep
+      ["Expected kind", P.pretty ek, "but got", P.pretty ie]
 
     NoRank2 ty -> spanMsg (getSpan ty)
       "This polymorphic type creates a rank 2 type that can't be specialized."

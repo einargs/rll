@@ -15,6 +15,8 @@ import Data.Foldable (asum)
 import Control.Applicative ((<|>))
 
 import QuoteTxt
+import Rll.AstUtil
+
 import qualified Rll.Parser as RP
 import Rll.TypeCheck
 import Rll.Ast
@@ -22,14 +24,6 @@ import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
 import Rll.Tc
 import Rll.Core
-
-es :: Span
-es = Span "test.rll" 1 1 1 1
-
-tyCon v = TyCon (Var v) es
-refTy v ty = RefTy (LtOf (Var v) es) ty es
-tyVar v i = TyVar (MkTyVar v i) es
-staticLt = LtJoin [] es
 
 processFile :: String -> T.Text
   -> Either (M.ParseErrorBundle T.Text RP.RllParseError) (Tc ())
@@ -62,6 +56,14 @@ consSum : Sum -M[]> Unit
 = \s -> case s of
 | Left i -> let Int = i in Unit
 | Right s -> let Str = s in Unit;
+
+copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
+= \[l : Lifetime] r -> drop r in Int;
+
+copyStr :
+  forall M [] l : Lifetime.
+  &l Str -M[]> Str
+= \r -> drop r in Str;
 |]
 
 baseCtx :: Ctx
@@ -104,38 +106,43 @@ checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
 -- We don't check that the types are equal because we haven't corrected
 -- the type variable indices in `Tm`.
 compareCoreToTm :: Core -> Tm -> Maybe (Core, Tm)
-compareCoreToTm fullCore@(Core cTy _ core) tm = case (core, tm) of
+compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf} = case (core, tmf) of
   -- Core has no anno so we skip it
-  (_, Anno t1 ty _) -> compareCoreToTm fullCore t1
-  (CaseCF c1 cb, Case t1 tb _) -> compareCoreToTm c1 t1 <|>
+  (_, Anno t1 ty) -> compareCoreToTm fullCore t1
+  (CaseCF c1 cb, Case t1 tb) -> compareCoreToTm c1 t1 <|>
     allBranches cb tb
-  (LetStructCF cCon cVars c1 c2, LetStruct tCon tVars t1 t2 _) ->
+  (LetStructCF cCon cVars c1 c2, LetStruct tCon tVars t1 t2) ->
     cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
     <|> compareCoreToTm c2 t2
-  (LetCF cv c1 c2, Let tv t1 t2 _) -> cv #= tv
+  (LetCF cv c1 c2, Let tv t1 t2) -> cv #= tv
     <|> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
-  (LamCF sv _ c1, FunTm tv _ t1 _) -> sv #= tv <|> compareCoreToTm c1 t1
-  (PolyCF _ _ c1, Poly _ t1 _) -> compareCoreToTm c1 t1
-  (ModuleVarCF cv, TmVar tv _) -> cv #= tv
-  (LocalVarCF cv, TmVar tv _) -> cv #= tv
-  (ConCF cv, TmCon tv _) -> cv #= tv
-  (CopyCF cv, Copy tv _) -> cv #= tv
-  (RefCF cv, RefTm tv _) -> cv #= tv
-  (AppTyCF c1 _, AppTy t1 _ _) -> compareCoreToTm c1 t1
-  (DropCF cv c1, Drop tv t1 _) -> cv #= tv <|> compareCoreToTm c1 t1
-  (AppTmCF c1 c2, AppTm t1 t2 _) -> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
-  (FixCF cv c1, FixTm tv t1 _) -> cv #= tv <|> compareCoreToTm c1 t1
-  (LiteralCF cl, LiteralTm tl _) -> cl #= tl
+  (LamCF cFix cPolys cArgs _ c1,
+   FunTm tFix tPolys tArgs t1) -> tFix #= cFix <|> compareCoreToTm c1 t1
+  (ModuleVarCF cv, TmVar tv) -> cv #= tv
+  (LocalVarCF cv, TmVar tv) -> cv #= tv
+  (ConCF _ cv, TmCon tv) -> cv #= tv
+  (CopyCF cv, Copy tv) -> cv #= tv
+  (RefCF cv, RefTm tv) -> cv #= tv
+  (AppTyCF c1 _, AppTy t1 _) -> compareCoreToTm c1 t1
+  (DropCF cv c1, Drop tv t1) -> cv #= tv <|> compareCoreToTm c1 t1
+  (AppTmCF c1 cs, _) ->
+    let (ts, t1) = collectApps tm
+    in compareCoreToTm c1 t1
+      <|> asum (zipWith compareCoreToTm cs $ reverse ts)
+  (LiteralCF cl, LiteralTm tl) -> cl #= tl
   _ -> err
   where
   err = Just (fullCore, tm)
+  collectApps t = case t.tmf of
+    AppTm t1 t2 -> let (ls, tf) = collectApps t1 in (t2:ls, tf)
+    _ -> ([], t)
   (#=) :: Eq a => a -> a -> Maybe (Core, Tm)
   a #= b | a == b = Nothing
          | otherwise = err
   allBranches cb tb | length cb /= length tb = error $ "wrong length"
                     | otherwise = asum $ zipWith compareBranches cb tb
-  compareBranches :: (SVar, [SVar], Core) -> CaseBranch -> Maybe (Core, Tm)
-  compareBranches (cCon,cVars,c1) (CaseBranch tCon tVars t1) =
+  compareBranches :: CaseBranch Core -> CaseBranch Tm -> Maybe (Core, Tm)
+  compareBranches (CaseBranch cCon cVars c1) (CaseBranch tCon tVars t1) =
     cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
 
 mkTest :: HasCallStack => Ctx -> T.Text -> Expectation
@@ -148,11 +155,16 @@ mkTest ctx txt = case M.parse RP.fileDecls "test.rll" txt of
     in case evalTc ctx $ typeCheckFile decls of
       Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
       Right coreFns ->
-        case asum $ zipWith compareCoreToTm (snd <$> coreFns) tmFns of
+        case asum $ zipWith compare (snd <$> coreFns) tmFns of
           Nothing -> pure ()
-          Just (core, tm) -> expectationFailure $
+          Just (fullCore, fullTm, core, tm) -> expectationFailure $
             "Core didn't match term.\nCore(" <> show core.span
-            <> "): " <> show core <> "\nTm: " <> show tm
+            <> "): " <> show core
+            <> "\nTm(" <> show tm.span <> "): " <> show tm
+            <> "\nFull Tm: " <> show fullTm
+            <> "\nFull Core: " <> show fullCore
+  where
+    compare core tm = (\(a,b) -> (core, tm, a, b)) <$> compareCoreToTm core tm
 
 rawTest :: HasCallStack => T.Text -> Expectation
 rawTest = mkTest emptyCtx

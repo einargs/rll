@@ -33,7 +33,9 @@ instance Hashable TyVar where
   hashWithSalt s (MkTyVar _ i) = hashWithSalt s i
 
 newtype TyVarBinding = TyVarBinding {name::Text}
-  deriving Show
+
+instance Show TyVarBinding where
+  show b = show b.name
 
 instance Eq TyVarBinding where
   _ == _ = True
@@ -45,7 +47,10 @@ data EnumCon = EnumCon Text [Ty]
   deriving (Show, Eq)
 
 data TypeParam = TypeParam { name::Text, kind:: Kind }
-  deriving (Show, Eq)
+  deriving (Eq)
+
+instance Show TypeParam where
+  showsPrec i (TypeParam n k) = shows n . (" : " <>) . shows k
 
 data Decl
   = FunDecl Text Ty Tm Span
@@ -162,7 +167,8 @@ basePrettyTy parenLevel ty@Ty{tyf} = case tyf of
     <+> prettyM m <+> basePrettyTy TyAppParen lts
     <+> pretty b.name <> ":" <+> pretty k <> "."
     <> layer (basePrettyTy NoTyParen t)
-  TyApp a b -> parenFor TyAppParen $ pretty a <+> pretty b
+  TyApp a b -> parenFor TyAppParen $
+    basePrettyTy TyAppParen a <+> basePrettyTy TyAppParen b
   where
     layer doc = softline <> nest 2 doc
     prettyM m = case m of
@@ -209,7 +215,10 @@ data TmF a
   deriving (Show, Eq, Functor, Foldable, Traversable)
 
 data Tm = Tm {span :: Span, tmf :: TmF Tm }
-  deriving (Show, Eq)
+  deriving (Eq)
+
+instance Show Tm where
+  showsPrec i (Tm _ tf) = showsPrec i tf
 
 instance Spans Tm where
   getSpan = (.span)

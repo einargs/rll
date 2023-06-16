@@ -10,6 +10,8 @@ import System.Timeout (timeout)
 import Control.Monad (unless)
 
 import QuoteTxt
+import Rll.AstUtil
+
 import Rll.Parser
 import Rll.Ast
 
@@ -45,132 +47,120 @@ canParse text = do
       Left err -> expectationFailure $ M.errorBundlePretty err
       Right _ -> pure ()
 
-es :: Span
-es = Span "test.rll" 1 1 1 1
-
-sv :: Text -> SVar
-sv t = (SVar (Var t) es)
-
 spec :: Spec
 spec = parallel do
   describe "tm" do
-    let tmVar n = TmVar (Var n) es
     it "parses terms in parentheses" do
-      TmCon (Var "Unit") es `tmFrom` "(   (Unit   ))"
+      tmCon "Unit" `tmFrom` "(   (Unit   ))"
     it "parses case expressions" do
-      let t = Case (tmVar "x") [b1, b2] es
-          b1 = CaseBranch (sv "True") [] (tmVar "y")
-          b2 = CaseBranch (sv "False") [] (tmVar "z")
+      let t = tmCase (tmVar "x") [br ["True"] $ tmVar "y", br ["False"] $ tmVar "z"]
       t `tmFrom` "case x of | True -> y | False -> z"
       -- TODO: I need to make a list of excluded keywords for the variable parsers.
     it "parses let struct" do
-      let t = LetStruct (sv "Pair") [sv "x", sv "y"] (tmVar "pairVar") body es
-          body = AppTm (tmVar "x") (tmVar "y") es
+      let t = letStruct ["Pair", "x", "y"] (tmVar "pairVar") body
+          body = appTm (tmVar "x") (tmVar "y")
       t `tmFrom` "let Pair x y = pairVar in x y"
     it "parses let var" do
-      let t = Let (sv "x") (TmVar (Var "y") es) (TmVar (Var "x") es) es
+      let t = tmLet "x" (tmVar "y") (tmVar "x")
       t `tmFrom` "let x = y in x"
     it "parses term function" do
-      let t a = FunTm (sv "x") a (TmVar (Var "x") es) es
-          t1 = t $ Just $ TyCon (Var "Unit") es
-          t2 = t Nothing
-      t1 `tmFrom` "\\x : Unit -> x"
+      let t1 = funTm [] [argT "x" $ tyCon "Unit"] $ tmVar "x"
+          t2 = funTm [] [argI "x"] $ tmVar "x"
+      t1 `tmFrom` "\\(x : Unit) -> x"
       t2 `tmFrom` "\\x -> x"
-    it "parses a polymorphic abstraction" do
-      let t = Poly (Just (TyVarBinding "x", LtKind)) (TmVar (Var "y") es) es
-          t2 = Poly Nothing (tmVar "y") es
-      t `tmFrom` "^x:Lifetime. y"
-      t2 `tmFrom` "^ y"
-      t2 `tmFrom` "^y"
+    it "parses a polymorphic function" do
+      let t1 = funTm [argK "l" LtKind] [argI "x"] $ tmVar "y"
+          t2 = funTm [argK "t" TyKind] [argT "x" $ tyVar0 "t"] $ tmVar "x"
+      t1 `tmFrom` "\\ [l:Lifetime] x -> y"
+      t2 `tmFrom` "\\ [t:Type] (x:t) -> x"
     it "parses term variable" do
       tmVar "x" `tmFrom` "x"
     it "parses copy" do
-      Copy (Var "x") es `tmFrom` "copy x"
+      copy "x" `tmFrom` "copy x"
     it "parses a reference" do
-      RefTm (Var "x") es `tmFrom` "&x"
+      ref "x" `tmFrom` "&x"
     it "parses term constructors" do
-      let tmCon t = TmCon (Var t) es
       tmCon "Unit" `tmFrom` "Unit"
-      AppTm (AppTm (tmCon "Pair") (tmCon "Int") es) (tmCon "Str") es `tmFrom` "Pair Int Str"
+      appTm (appTm (tmCon "Pair") (tmCon "Int")) (tmCon "Str") `tmFrom` "Pair Int Str"
     it "parses type application" do
-      let t = AppTy (tmVar "x") (TyCon (Var "Bool") es) es
-      t `tmFrom` "x [Bool]"
+      let t1 = appTy (tmVar "x") [tyCon "Bool"]
+          t2 = appTy (tmVar "x") [tyCon "Bool", tyCon "Int"]
+      t1 `tmFrom` "x [Bool]"
+      t2 `tmFrom` "x [Bool] [Int]"
     it "parses drop" do
-      Drop (sv "x") (tmVar "y") es `tmFrom` "drop x in y"
+      dropv "x" (tmVar "y") `tmFrom` "drop x in y"
     it "parses function application" do
-      AppTm (tmVar "x") (tmVar "y") es `tmFrom` "x y"
+      appTm (tmVar "x") (tmVar "y") `tmFrom` "x y"
     it "parses recursive functions" do
-      let t = FixTm (sv "f") (FunTm (sv "x") Nothing (tmVar "x") es) es
-      t `tmFrom` "rec f -> (\\ x -> x)"
-      t `tmFrom` "rec f -> \\ x -> x"
+      let t1 = fixFunTm "f" [] [argI "x"] $ tmVar "x"
+          t2 = fixFunTm "f" [argK "l" LtKind] [argI "x"] $ tmVar "x"
+      t1 `tmFrom` "rec f \\ x -> x"
+      t2 `tmFrom` "rec f \\ [l:Lifetime] x -> x"
     it "parses type application" do
-      Anno (tmVar "x") (TyCon (Var "Bool") es) es `tmFrom` "x : Bool"
+      anno (tmVar "x") (tyCon "Bool") `tmFrom` "x : Bool"
     it "parses an integer literal" do
-      LiteralTm (IntLit 51) es `tmFrom` "51"
-      LiteralTm (IntLit (-47)) es `tmFrom` "-47"
+      intL 51 `tmFrom` "51"
+      intL (-47) `tmFrom` "-47"
       parseShouldError tm "- 13"
     it "parses a string literal" do
-      let t = LiteralTm (StringLit "hello darkness my old friend") es
+      let t = strL "hello darkness my old friend"
       t `tmFrom` [txt|"hello darkness my old friend"|]
     it "throws an error for nonsense" do
       -- TODO: seems to badly infinite loop and grow and run everything out of resources?
       parseShouldError tm "!@#@! "
 
   describe "ty" do
-    let ltJoinXY = LtJoin [LtOf (Var "x") es, LtOf (Var "y") es] es
-        unitTy = TyCon (Var "Unit") es
+    let ltJoinXY = ltJoin [ltOf "x", ltOf "y"]
+        unitTy = tyCon "Unit"
     it "parses the unit type" do
       unitTy `tyFrom` "Unit "
       unitTy `tyFrom` "Unit"
     it "parses a type variable" do
-      TyVar (MkTyVar "x" 0) es `tyFrom` "x "
+      tyVar0 "x" `tyFrom` "x "
     it "can parse a type constructor" do
-      TyCon (Var "Bool") es `tyFrom` "Bool"
+      tyCon "Bool" `tyFrom` "Bool"
     it "parses in parentheses" do
       unitTy `tyFrom` "((Unit))"
-      LtOf (Var "y") es `tyFrom` "( ( 'y) )"
+      ltOf "y" `tyFrom` "( ( 'y) )"
     it "parses a lifetime" do
-      LtOf (Var "x") es `tyFrom` "'x "
+      ltOf "x" `tyFrom` "'x "
     it "parses a lifetime join" do
       ltJoinXY `tyFrom` "[ 'x , 'y ] "
       ltJoinXY `tyFrom` "['x , 'y] "
       ltJoinXY `tyFrom` "['x,'y]"
     it "parses a function lifetime" do
-      let t = FunTy Single unitTy ltJoinXY unitTy es
+      let t = funTy Single unitTy ltJoinXY unitTy
       t `tyFrom` "Unit-S['x,'y]>Unit"
       t `tyFrom` "Unit -S[ 'x, 'y ]> Unit"
       t `tyFrom` "Unit -S [ 'x, 'y ] > Unit"
     it "parses a reference type" do
-      RefTy (LtOf (Var "x") es) unitTy es `tyFrom` "&'x Unit"
+      refVar "x" unitTy `tyFrom` "&'x Unit"
     it "parses a polymorphic type" do
-      let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
+      let t = univ Single ltJoinXY "a" TyKind unitTy
       t `tyFrom` "forall S ['x,'y] a : Type. Unit"
     it "ignores block comments" do
-      let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
+      let t = univ Single ltJoinXY "a" TyKind unitTy
       t `tyFrom` "forall S ['x,'y] /*THIS IS A COMMENT*/ a : Type. Unit"
     it "ignores line comments" do
-      let t = Univ Single ltJoinXY (TyVarBinding "a") TyKind unitTy es
+      let t = univ Single ltJoinXY "a" TyKind unitTy
       t `tyFrom` "forall S ['x,'y]a : Type. Unit // COMMENT"
     it "throws an error for nonsense" do
       parseShouldError ty "!@#@! "
 
   describe "decl" do
-    let tyCon t = TyCon (Var t) es
-        tyVar n = TyVar (MkTyVar n 0) es
-        tmVar n = TmVar (Var n) es
-        tyKind v = TypeParam v TyKind
+    let tyKind v = TypeParam v TyKind
     it "parses function declarations" do
       let t = FunDecl "test" (tyCon "Bool") (tmVar "b") es
       t `declFrom` "test : Bool = b;"
     it "parses enum declarations" do
       let t1 = EnumDecl "Either" [tyKind "a", tyKind "b"] [l, r] es
-          l = EnumCon "Left" [tyVar "a"]
-          r = EnumCon "Right" [tyVar "b", tyVar "c"]
+          l = EnumCon "Left" [tyVar0 "a"]
+          r = EnumCon "Right" [tyVar0 "b", tyVar0 "c"]
           t2 = EnumDecl "Bool" [] [EnumCon "False" [], EnumCon "True" []] es
       t1 `declFrom` "enum Either (a:Type) (b:Type) = Left a | Right b c;"
       t2 `declFrom` "enum Bool = False | True;"
     it "parses struct declarations" do
-      let t1 = StructDecl "Pair" [tyKind "a", tyKind "b"] [tyVar "a", tyVar "b"] es
+      let t1 = StructDecl "Pair" [tyKind "a", tyKind "b"] [tyVar0 "a", tyVar0 "b"] es
           t2 = StructDecl "IS" [] [tyCon "Int", tyCon "Str"] es
       t1 `declFrom` "struct Pair (a:Type) (b:Type) { a b }"
       t2 `declFrom` "struct IS { Int Str }"

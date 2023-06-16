@@ -4,7 +4,7 @@ module Rll.Context
   ) where
 
 import Data.HashMap.Strict qualified as M
-import Data.Text (Text)
+import Data.Text (Text, unpack)
 import Data.List (foldl')
 
 import Rll.Ast
@@ -84,7 +84,10 @@ data DataType
   = EnumType Text [TypeParam] (M.HashMap Text [Ty]) Span
   | StructType Text [TypeParam] [Ty] Span
   | BuiltInType BuiltInType
-  deriving (Eq, Show)
+  deriving (Eq)
+
+instance Show DataType where
+  show = unpack . getDataTypeName
 
 getDataTypeName :: DataType -> Text
 getDataTypeName dt = case dt of

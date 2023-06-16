@@ -6,6 +6,7 @@ import Rll.TypeError (TyErr(..))
 
 import Test.Hspec
 
+import Rll.AstUtil
 import Rll.TcSpecUtil
 
 spec :: Spec
@@ -58,7 +59,7 @@ spec = parallel do
     it "can check type application" do
       baseTest [txt|
         id : forall M [] t : Type . t -S[]> t
-        = ^ t : Type. \v -> v;
+        = \ [t : Type] v -> v;
         test1 : Unit -S[]> Unit
         = id [ Unit ];
 
@@ -75,7 +76,7 @@ spec = parallel do
           forall M [] l1 : Lifetime .
           forall S [] l2 : Lifetime .
           &l1 Int -S[]> &l2 Str -S[l1]> Unit
-        = ^ l1 : Lifetime. ^ l2 : Lifetime. \ir -> \sr ->
+        = \ [l1 : Lifetime] [l2 : Lifetime] ir sr ->
         drop ir in drop sr in Unit;
 
         test : Unit
@@ -96,10 +97,10 @@ spec = parallel do
         |]
 
     it "can synthesize a multiple use function type" do
-      "\\ a : Unit -> a" `synthTo` "Unit -M[]> Unit"
+      "\\ (a : Unit) -> a" `synthTo` "Unit -M[]> Unit"
 
     it "can synth and check a single use function type" do
-      let f = [txt|let a = Int in (\b : Unit -> let Int = a in b) |]
+      let f = [txt|let a = Int in (\(b : Unit) -> let Int = a in b) |]
           fTy = "Unit -S[]> Unit"
       f `synthTo` fTy
       f `checkTo` fTy
@@ -107,14 +108,14 @@ spec = parallel do
     it "can catch using the wrong constructor in let-struct" do
       baseFailTest (WrongConstructor (Var "Unit") "Int" (Var "Int") es) [txt|
         test : Int -M[]> Unit -S[]> Unit
-        = \a -> \b : Unit -> let Unit = a in b;
+        = \a (b : Unit) -> let Unit = a in b;
         |]
 
     it "can infer a function type that captures references" do
       baseTest [txt|
         test : Unit
         = let a = Left Int in let Unit =
-        (\b : Unit -> case &a of
+        (\(b : Unit) -> case &a of
           | Left i -> drop i in b
           | Right s -> drop s in b) Unit in
         consSum a;
@@ -124,7 +125,7 @@ spec = parallel do
       baseTest [txt|
         test : Unit
         = let a = Left Int in let Unit =
-        ((\b : Unit -> case &a of
+        ((\(b : Unit) -> case &a of
           | Left i -> drop i in b
           | Right s -> drop s in b)
           : Unit -M['a]> Unit) Unit in
@@ -134,7 +135,7 @@ spec = parallel do
     it "can coerce a multi-use function to be single use" do
       baseTest [txt|
         test : Unit
-        = let f = ((\b:Unit -> b) : Unit -S[]> Unit) in
+        = let f = ((\(b:Unit) -> b) : Unit -S[]> Unit) in
         f Unit;
         |]
 
@@ -153,23 +154,23 @@ spec = parallel do
     it "can check simple recursive functions" do
       baseTest [txt|
          test : Unit -M[]> Unit
-         = rec f -> \ x -> x;
+         = rec f \ x -> x;
 
          test2 : Unit -M[]> Unit -M[]> Unit
-         = rec f1 -> \ x ->
+         = rec f1 \ x ->
          let Unit = x in
-         rec f2 -> \ y -> y;
+         rec f2 \ y -> y;
          |]
 
     it "can catch a recursive function being single use" do
       baseFailTest (CannotFixSingle es es) [txt|
         test : Unit -S[]> Unit
-        = rec f -> \ x -> x;
+        = rec f \ x -> x;
         |]
     it "can catch a recursive polymorphic function being single use" do
       baseFailTest (CannotFixSingle es es) [txt|
         test : forall S [] l : Lifetime. &l Unit -S[]> Unit
-        = rec f -> ^ \ x -> drop x in Unit;
+        = rec f \ x -> drop x in Unit;
         |]
 
     it "can check complex multi-argument functions with polymorphism" do
@@ -177,39 +178,39 @@ spec = parallel do
         copyInt1 :
           forall M [] l : Lifetime.
           &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
+        = \r -> drop r in Int;
 
         copyInt2 :
-          Unit -M[]>
           forall M [] l : Lifetime.
+          Unit -M[]>
           &l Int -M[]> Int
-        = \x -> let Unit = x in ^ \r -> drop r in Int;
+        = \x -> let Unit = x in \r -> drop r in Int;
 
         copyInt2e :
-          Unit -M[]>
           forall M [] l : Lifetime.
+          Unit -M[]>
           &l Int -M[]> Int
-        = \x -> let Unit = x in ^ l : Lifetime. \r -> drop r in Int;
+        = \[l:Lifetime] x -> let Unit = x in \r -> drop r in Int;
 
         copyInt3 :
           forall M [] l1 : Lifetime.
-          &l1 Unit -M[]>
           forall M [] l : Lifetime.
+          &l1 Unit -M[]>
           &l Int -M[]> Int
-        = ^ \x -> drop x in ^ \r -> drop r in Int;
+        = \x -> drop x in \r -> drop r in Int;
 
         copyInt3e :
           forall M [] l1 : Lifetime.
-          &l1 Unit -M[]>
           forall M [] l : Lifetime.
+          &l1 Unit -M[]>
           &l Int -M[]> Int
-        = ^l1:Lifetime. \x -> drop x in ^ l : Lifetime. \r -> drop r in Int;
+        = \[l1:Lifetime] [l:Lifetime] x -> drop x in \r -> drop r in Int;
 
         test : Unit
         = let i = Int in
         let u = Unit in
         let Int = copyInt1 ['i] &i in
-        let Int = copyInt3e ['u] &u ['i] &i in
+        let Int = copyInt3e ['u] ['i] &u &i in
         let Unit = u in
         let Int = i in
         Unit;
@@ -220,13 +221,13 @@ spec = parallel do
         enum Nat = Succ Nat | Zero;
 
         double : forall M [] l : Lifetime. &l Nat -M[]> Nat
-        = rec f -> ^ l : Lifetime.
-        \ x -> case x of
+        = rec f \ [l : Lifetime] x ->
+        case x of
         | Zero -> Zero
         | Succ n -> Succ (Succ (copy f [l] n));
 
         add : forall M [] l : Lifetime. &l Nat -M[]> Nat -S[l]> Nat
-        = rec f -> ^ l : Lifetime. \natRef -> \nat ->
+        = rec f \ [l : Lifetime] natRef nat ->
         case natRef of
         | Succ n -> copy f [l] n (Succ nat)
         | Zero -> nat;
@@ -253,7 +254,7 @@ spec = parallel do
         |]
 
     it "can prevent taking reference of a reference" do
-      let ty = refTy "a" (tyCon "Int")
+      let ty = refVar "a" (tyCon "Int")
       baseFailTest (CannotRefOfRef ty es) [txt|
         test : Int
         = let a = Int in
@@ -308,9 +309,6 @@ spec = parallel do
 
     it "can catch a reference used after being dropped" do
       baseFailTest (RemovedTermVar es es) [txt|
-        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ l : Lifetime. \r -> drop r in Int;
-
         test : Int -M[]> Int
         = \a -> let b = &a in
         drop b in
@@ -335,16 +333,16 @@ spec = parallel do
         consume2Ref :
           forall M [] l1 :Lifetime. forall M[] l2 : Lifetime.
           &l1 Int -M[]> &l2 Str -S[l1]> Unit
-        = ^ ^ \ir -> \sr ->
+        = \ir sr ->
         drop ir in drop sr in
         Unit;
 
         test : Unit -M[]> Unit
         = \a-> let i = Int in
         let s = Str in
-        let Unit = ((((consume2Ref ['i])
-        : forall M [] l2 : Lifetime. &'i Int -M[]> &l2 Str -S['i]> Unit)
-        ['s]) : &'i Int -M[]> &'s Str -S['i]> Unit)
+        let Unit = consume2Ref ['i] ['s] &i &s in
+        let Unit = ((consume2Ref ['i] ['s]
+        ) : &'i Int -M[]> &'s Str -S['i]> Unit)
           &i &s in
         let Int = i in let Str = s in a;
         |]
@@ -352,10 +350,10 @@ spec = parallel do
     it "can avoid free variable capture in type substitution" do
       baseTest [txt|
         id : forall M [] t : Type. t -M[]> t
-        = ^ \a -> a;
+        = \a -> a;
 
         test : forall M [] t : Type. t -M[]> t
-        = ^ t : Type. \a ->
+        = \ [t : Type] a ->
         let b = id [&'a t] &a in
         drop b in a;
         |]
@@ -363,7 +361,7 @@ spec = parallel do
     it "can use a local multi-use function through references" do
       baseTest [txt|
         test : Unit
-        = let f = \a:Unit -> a in
+        = let f = \(a:Unit) -> a in
         let Unit = &f Unit in
         let Unit = &f Unit in
         drop f in
@@ -373,9 +371,6 @@ spec = parallel do
 
     it "can check directly borrowing an external variable" do
       baseTest [txt|
-        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         test : Unit
         = let i = Int in
         let f = ((\u ->
@@ -392,9 +387,6 @@ spec = parallel do
 
     it "can check directly copying an external variable" do
       baseTest [txt|
-        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         test : Unit
         = let i = Int in
         let ir = &i in
@@ -411,13 +403,9 @@ spec = parallel do
         |]
 
     it "can catch an incorrect borrow list" do
-      let lt s = LtOf (Var s) es
-          ty1 = LtJoin [lt "i", lt "s"] es
-          list = [lt "i"]
+      let ty1 = ltJoin [ltOf "i", ltOf "s"]
+          list = [ltOf "i"]
       baseFailTest (IncorrectBorrowedVars ty1 list es) [txt|
-        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         test : Unit
         = let i = Int in
         let s = Str in
@@ -435,13 +423,10 @@ spec = parallel do
     it "Are borrow lists in returned functions checked" do
       -- TODO: once this checks rewrite it to cause an error I can make sure works.
       baseTest [txt|
-        copyInt : forall M [] l : Lifetime. &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         mkCopier : forall M [] l : Lifetime.
           &l Int -M[]> Unit -M[l]> Int
-        = ^l:Lifetime. \r->
-        let f = (\u:Unit -> let Unit = u in copyInt [l] (copy r)) in
+        = \[l:Lifetime] r->
+        let f = (\(u:Unit) -> let Unit = u in copyInt [l] (copy r)) in
         drop r in f;
 
         test : Unit -M[]> Unit
@@ -456,24 +441,29 @@ spec = parallel do
         a;
         |]
 
-    it "shifts type variable indices for term variable types" do
+    fit "shifts type variable indices for term variable types" do
       -- Basically we're checking to make sure that if I have a type variable with index 0
       -- in a variable's type, and then introduce a type binder, that variable is shifted
       -- to account for the change.
+
+      -- I think this error is because of a mixup. `t` is getting hit with 
       baseTest [txt|
         f : forall M [] t : Type.
-          t -M[]> forall S [] l : Lifetime.
-          &l t -S[]> t
-        = ^ t : Type. \v -> ^ l : Lifetime.
-        \ r -> drop r in v;
+          forall S [] l : Lifetime.
+          t -M[]> &l t -S[]> t
+        = \ [t : Type] [l : Lifetime] v ->
+        let fr = \[l2:Lifetime] [t2: Type] (r: &l2 t2) -> drop r in v in
+        fr [l] [t];
 
         test : Unit -M[]> Unit
         = \ a ->
         let b = Unit in
-        let c = f [Unit] a ['b] &b in
+        let c = f [Unit] ['b] a &b in
         let Unit = b in c;
         |]
 
+    {- TODO: Rewrite to use function annotations on local lambdas to
+      make sure the borrow check works with univ types.
     it "properly maintains borrow counts when returning univ and function types" do
       baseTest [txt|
         other : Unit -M[]> forall S [] l1 : Lifetime.
@@ -494,11 +484,12 @@ spec = parallel do
         let Unit = u2 in
         Unit;
         |]
+    -}
 
     it "can pass references as type arguments" do
       baseTest [txt|
         id : forall M [] t : Type. t -M[]> t
-        = ^ \v -> v;
+        = \v -> v;
 
         test : Unit
         = let u = Unit in
@@ -511,7 +502,7 @@ spec = parallel do
       baseTest [txt|
         struct Holder (a:Type) { a }
         id : forall M [] t : Type. t -M[]> t
-        = ^ \v -> v;
+        = \v -> v;
 
         test : Unit
         = let u = Unit in
@@ -522,11 +513,6 @@ spec = parallel do
 
     it "can check constructing and destructuring a generic struct" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
         test : Unit
         = let tup = Tuple [Str] [Int] Str Int in
         let Tuple s i = &tup in
@@ -538,11 +524,6 @@ spec = parallel do
 
     it "can check nesting a generic struct" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
         test : Unit
         = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
         let Tuple i stup = tup in
@@ -553,11 +534,6 @@ spec = parallel do
 
     it "can check borrowing a generic struct" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
         test : Unit
         = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
         let Tuple ir stupr = &tup in
@@ -570,16 +546,6 @@ spec = parallel do
 
     it "can check complex usage of several generic structs" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
-        copyInt :
-          forall M [] l : Lifetime.
-          &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         test : Unit
         = let tup = Tuple [Str] [Int] Str Int in
         let Tuple s i = &tup in
@@ -601,16 +567,6 @@ spec = parallel do
 
     it "makes sure copy correctly maintains the type of a sub-reference" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
-        copyInt :
-          forall M [] l : Lifetime.
-          &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         test : Unit
         = let tup = Tuple [Int] [Tuple Str Str] Int (Tuple [Str] [Str] Str Str) in
         let Tuple i stup = &tup : &'tup (Tuple Int (Tuple Str Str)) in
@@ -631,7 +587,7 @@ spec = parallel do
       baseTest [txt|
         struct Hold (a:Type) { a }
         higher : forall M [] h : Type -> Type. (Unit -M[]> h Unit) -S[]> h Unit
-        = ^ \ c -> c Unit;
+        = \ c -> c Unit;
 
         test : Hold Unit
         = higher [Hold] (Hold [Unit]);
@@ -640,16 +596,6 @@ spec = parallel do
 
     it "can check complex usage of a generic enum" do
       baseTest [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
-        copyInt :
-          forall M [] l : Lifetime.
-          &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         consEnum : Either Str (Either Int Str) -M[]> Unit
         = \e1 -> case e1 of
         | InL s -> let Str = s in Unit
@@ -676,16 +622,6 @@ spec = parallel do
 
     it "can catch a borrow error in complex usage of a generic enum" do
       baseFailTest (CannotUseBorrowedVar (Var "e1") [Var "s1"] es) [txt|
-        copyStr :
-          forall M [] l : Lifetime.
-          &l Str -M[]> Str
-        = ^ \r -> drop r in Str;
-
-        copyInt :
-          forall M [] l : Lifetime.
-          &l Int -M[]> Int
-        = ^ \r -> drop r in Int;
-
         consEnum2 : Either Str (Either Int Str) -M[]> Unit
         = \e1 -> case e1 of
         | InL s -> let Str = s in Unit
@@ -722,14 +658,14 @@ spec = parallel do
         struct Hold (a:Type) { a }
         test : forall M [] l : Lifetime.
           (&l Hold) -M[]> (&l Hold)
-        = ^ \v -> v;
+        = \v -> v;
         |]
 
     it "can catch bad type application" do
       baseFailTest (IsNotTyOp TyKind es) [txt|
         test : forall M [] l : Lifetime.
           (&l Int) Int -M[]> (&l Int) Int
-        = ^ \v -> v;
+        = \v -> v;
         |]
 
     it "can catch non-sense types" do
@@ -737,7 +673,7 @@ spec = parallel do
         id :
           forall M [] t : Type.
           t -M[]> t
-        = ^ \v -> v;
+        = \v -> v;
 
         test : Unit
         = let a = Str in
@@ -748,7 +684,7 @@ spec = parallel do
       baseFailTest (ExpectedKind TyKind (TyOpKind TyKind TyKind) es) [txt|
         struct Hold (a:Type) { a }
         test : forall M [] l : Lifetime. Unit -M[]> (&l Hold) Unit
-        = ^ \v -> v;
+        = \v -> v;
         |]
 
     it "can catch using a type instead of a lifetime" do
@@ -762,7 +698,9 @@ spec = parallel do
         enum ListF (a:Type) (b:Type)
           = NilF
           | ConsF a b;
+
         struct Fix (f:Type -> Type) { (f (Fix f)) }
+
         test : Fix (ListF Int) = Fix [ListF Int]
           (ConsF [Int] [Fix (ListF Int)] Int
             (Fix [ListF Int]
@@ -781,14 +719,14 @@ spec = parallel do
         |]
 
     it "can catch a rank 2 type" do
-      let univTy = Univ Many staticLt (TyVarBinding "x") TyKind funTy es
-          x = tyVar "x" 0
-          funTy =FunTy Many x staticLt x es
+      let univTy = univ Many staticLt "x" TyKind fTy
+          x = tyVar0 "x"
+          fTy = funTy Many x staticLt x
 
       baseFailTest (NoRank2 univTy) [txt|
         test : forall M [] l : Lifetime.
           &l (forall M [] x : Type. x -M[]> x) -M[]> Unit
-        = ^ \r -> drop r in Unit;
+        = \r -> drop r in Unit;
         |]
 
     it "can check integer literals" do
@@ -803,6 +741,7 @@ spec = parallel do
         s2 : String = "Everyone";
         |]
 
+    {- 
     fit "Quick test" do
       baseTest [txt|
         test : Unit
@@ -814,6 +753,7 @@ spec = parallel do
         let Unit = f Unit in
         u;
         |]
+-}
 
 
 

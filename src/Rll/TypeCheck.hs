@@ -15,6 +15,7 @@ import Control.Monad.State (MonadState(..), gets)
 import Control.Monad.Except (MonadError(..))
 import Data.List (find, unzip4, foldl')
 import Data.Maybe (catMaybes)
+import Debug.Trace qualified as D
 
 -- | Use this to construct the type of a reference type.
 createVarRef :: Var -> Span -> Tc Ty
@@ -455,8 +456,9 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
 
     withArgs :: [(SVar, Maybe Ty)] -> (Ty -> Tc Core) -> Ty -> Tc ([(SVar, Ty)], Core)
     withArgs args cont funTy = do
-      let (baseTy, tyLayers) = extractTyLayers funTy
-      unless (length args == length tyLayers) $ throwError $ PartialArgsInLam funTy s
+      let (baseTy, tyLayers) = extractTyLayers (length args) funTy
+      unless (length tyLayers == length args) $ throwError $
+        TooManyArgsInLam funTy s
       layers <- forM (zip args tyLayers) \((v,mbTy), (m,aTy,lts,tySpan)) -> do
         case mbTy of
           Just vTy -> unless (vTy == aTy) $ throwError $ ExpectedType aTy vTy
@@ -470,12 +472,14 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
           mkClosureCheck s body m lts do
             addVar v.var v.span vTy
             act
-        extractTyLayers :: Ty -> (Ty, [(Mult, Ty, Ty, Span)])
-        extractTyLayers ty@Ty{span, tyf} = case tyf of
-          FunTy m aTy lts bTy ->
-            let (baseTy, layers) = extractTyLayers bTy
-            in (baseTy, (m,aTy,lts,span):layers)
-          _ -> (ty, [])
+        extractTyLayers :: Int -> Ty -> (Ty, [(Mult, Ty, Ty, Span)])
+        extractTyLayers i ty@Ty{span, tyf}
+          | i > 0 = case tyf of
+            FunTy m aTy lts bTy ->
+              let (baseTy, layers) = extractTyLayers (i-1) bTy
+              in (baseTy, (m,aTy,lts,span):layers)
+            _ -> (ty, [])
+          | otherwise = (ty, [])
 
     withFix :: Maybe SVar -> Tc Core -> Tc Core
     withFix Nothing act = act
@@ -632,6 +636,7 @@ typeCheckFile = fmap catMaybes . mapM go where
       ty' <- indexTyVars ty
       sanityCheckType ty'
       body' <- indexTyVarsInTm body
+      D.traceM $ "body: " <> show body'
       core <- check ty' body'
       put ctx
       addModuleFun s (Var name) ty'

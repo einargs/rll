@@ -72,6 +72,7 @@ default-extensions:
 ghc-options:
 - -Wincomplete-patterns
 - -fwarn-unused-imports
+- -fprof-auto-calls
 
 library:
   source-dirs: src

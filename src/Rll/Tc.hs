@@ -19,6 +19,7 @@ import Rll.TypeError
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
+import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
@@ -27,6 +28,8 @@ import Control.Arrow (first, second)
 import Data.List (foldl')
 import Safe (atMay)
 import Data.Maybe (mapMaybe)
+import Control.Exception (assert)
+import Debug.Trace qualified as D
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -120,7 +123,13 @@ kindOf ty@Ty{span=s, tyf} = case tyf of
 kindCheck :: Kind -> Ty -> Tc ()
 kindCheck k ty = do
   k' <- kindOf ty
-  unless (k==k') $ throwError $ ExpectedKind k k' $ getSpan ty
+  unless (k==k') $ do
+    kindCtx <- gets (.localTypeVars)
+    D.traceM $ "local type var ctx: " <> show kindCtx
+    D.traceM $ "ty has wrong kind " <> show ty
+    D.traceStack ("ty has wrong kind " <> show ty) $
+      -- error $ "ty has wrong kind " <> show ty
+      throwError $ ExpectedKind k k' $ getSpan ty
 
 -- | Used to implement checkForRank2 and `checkForPoly`.
 checkTyForm :: (Ty -> TyErr) -> Bool -> Ty -> Tc ()
@@ -416,7 +425,7 @@ typeSub = rawTypeSub 0
 rawIndexTyVars :: Int -> M.HashMap Text Int -> Ty -> Tc Ty
 rawIndexTyVars i idxMap typ@Ty{span=s, tyf} = fmap (Ty s) $ case tyf of
   TyVar tv@(MkTyVar name _) -> case M.lookup name idxMap of
-    Just i' -> pure $ TyVar (MkTyVar name $ i-i')
+    Just i' -> assert (i-i' >= 0) $ pure $ TyVar (MkTyVar name $ i-i')
     Nothing -> throwError $ UnknownTypeVar tv s
   Univ m lts bind@(TyVarBinding name) k bodyTy -> do
     lts' <- f' lts
@@ -442,9 +451,11 @@ indexTyVarsInTm = g 0 M.empty where
           i' = i + length polyB
           toArg (v, Just vTy) = (v,) . Just <$> rawIndexTyVars i' idxMap' vTy
           toArg b = pure b
+      D.traceShowM (i', idxMap')
       argB' <- mapM toArg argB
+      D.traceShowM argB'
       t1' <- g i' idxMap' t1
-      pure $ FunTm fix polyB argB t1'
+      pure $ FunTm fix polyB argB' t1'
     AppTy t1 tys -> do
       t1' <- f t1
       tys' <- mapM (rawIndexTyVars i idxMap) tys

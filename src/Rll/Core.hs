@@ -19,7 +19,10 @@ data ClosureUse a
 newtype ClosureEnv = ClosureEnv
   { envMap :: M.HashMap Var (ClosureUse Ty)
   }
-  deriving (Show, Eq)
+  deriving (Eq)
+
+instance Show ClosureEnv where
+  showsPrec i ce = showsPrec i ce.envMap
 
 -- | This IR is produced during type checking and annotates every
 -- term with its type.
@@ -49,7 +52,7 @@ extendAppTm t1@Core{coref} t2 = case coref of
   _ -> AppTmCF t1 [t2]
 
 instance Show Core where
-  show (Core _ _ cf) = show cf
+  showsPrec i (Core _ _ cf) = showsPrec i cf
 
 instance Spans Core where
   getSpan = (.span)

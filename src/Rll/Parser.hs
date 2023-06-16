@@ -260,7 +260,7 @@ tm = fullTm
             C.char ']'
             s1 <- getSourcePos
             space
-            tyArg (t:tys) <|> pure (wrap t1 s1 $ AppTy t1 $ t:tys)
+            tyArg (t:tys) <|> pure (wrap t1 s1 $ AppTy t1 $ reverse $ t:tys)
       tyArg []
     termApps t1 = try $ label "term applications" do
       args <- some subTm
