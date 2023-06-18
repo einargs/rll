@@ -370,6 +370,8 @@ mkClosureCheck s body mult lts m = do
 
   pure val
 
+-- | Increment the borrow counts of captured lifetimes in the closure
+-- type passed.
 incrementLtsIn :: Ty -> Tc ()
 incrementLtsIn ty = case ty.tyf of
   Univ _ lts _ _ _ -> incrementLts lts
