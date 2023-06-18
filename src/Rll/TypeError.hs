@@ -11,6 +11,7 @@ import Data.Vector.Unboxed qualified as V
 import Prettyprinter qualified as P
 import Prettyprinter ((<+>))
 import Prettyprinter.Render.Text qualified as PRT
+import Debug.Trace qualified as D
 
 import Rll.Ast
 
@@ -200,7 +201,7 @@ varList = T.intercalate ", " . fmap (.name)
 prettyPrintError :: Text -> TyErr -> Text
 prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
   lineLengths = V.fromList $ T.length <$> T.lines source
-  getColAt i = lineLengths V.! i+1
+  getColAt i = (lineLengths V.! (i-1)) + 1
 
   spanToPtrs connect lbl ptrStyle s = f <$> [s.startLine..s.endLine] where
     f line = E.Pointer line startCol endCol connect lbl ptrStyle where
@@ -379,6 +380,10 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
 
     NoRank2 ty -> spanMsg (getSpan ty)
       "This polymorphic type creates a rank 2 type that can't be specialized."
+
+    UnstableBorrowCounts vars s -> spanMsg s $ ptext $
+      "Too many borrows or drops of variables external to the closure:"
+      <> P.softline <> P.pretty vars
 
     _ -> E.Errata (Just $ T.pack $ show err) [] Nothing
       -- [E.Block defaultStyle ("unimplemented", 1, 1) Nothing [] (Just $ T.pack $ show err)]

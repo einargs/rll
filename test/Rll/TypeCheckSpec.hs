@@ -441,18 +441,13 @@ spec = parallel do
         a;
         |]
 
-    fit "shifts type variable indices for term variable types" do
-      -- Basically we're checking to make sure that if I have a type variable with index 0
-      -- in a variable's type, and then introduce a type binder, that variable is shifted
-      -- to account for the change.
-
-      -- I think this error is because of a mixup. `t` is getting hit with 
+    it "shifts type variable indices for term variable types" do
       baseTest [txt|
         f : forall M [] t : Type.
           forall S [] l : Lifetime.
           t -M[]> &l t -S[]> t
         = \ [t : Type] [l : Lifetime] v ->
-        let fr = \[l2:Lifetime] [t2: Type] (r: &l2 t2) -> drop r in v in
+        let fr = \[l2:Lifetime] [t2: Type] (r: &l2 t) -> drop r in v in
         fr [l] [t];
 
         test : Unit -M[]> Unit
@@ -463,28 +458,60 @@ spec = parallel do
         |]
 
     {- TODO: Rewrite to use function annotations on local lambdas to
-      make sure the borrow check works with univ types.
-    it "properly maintains borrow counts when returning univ and function types" do
+      make sure the borrow check works with univ types. -}
+    it "maintains borrow counts when returning function types" do
       baseTest [txt|
-        other : Unit -M[]> forall S [] l1 : Lifetime.
+        other : forall S [] l1 : Lifetime.
           forall S [] l2 : Lifetime.
+          forall S [] t : Type.
           &l1 Unit -S[]> &l2 Unit -S[l1]>
-          forall S [l1, l2] t : Type. t -S[l1, l2]> t
-        = \x -> ^ l1 : Lifetime. ^l2 : Lifetime.
-        \r1 -> \r2 -> ^ t:Type. \y ->
-        let Unit = x in
+          t -S[l1, l2]> t
+        = \ [l1 : Lifetime] [l2 : Lifetime] [t:Type] r1 r2 y ->
         drop r1 in drop r2 in y;
 
         test : Unit
         = let u1 = Unit in
         let u2 = Unit in
-        let final = other Unit ['u1] ['u2] &u1 &u2 in
-        let Int = final [Int] Int in
+        let partial = other ['u1] ['u2] [Int] &u1 in
+        let Int = partial &u2 Int in
         let Unit = u1 in
         let Unit = u2 in
         Unit;
         |]
-    -}
+
+    fit "can take a reference to a variable outside a closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let f = ((\x ->
+          let r = &i in drop r in x)
+          : Unit -M['i]> Unit) in
+        let Unit = &f Unit in
+        let Unit = &f Unit in
+        drop f in i;
+        |]
+
+    fit "can capture external references in a polymorphic closure" do
+      baseTest [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let r1 = &u1 in let r2 = &u2 in
+        let other =
+          ((\y ->
+            let c1 = copy r1 in let c2 = copy r2 in
+            drop c1 in drop c2 in y)
+            : forall S ['u1, 'u2] t : Type.
+            t -S['u1, 'u2]> t) in
+        let final = other in
+        let Int = final Int in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+    -- TODO: doesn't allow multi-use univ around single use functions that can
+    -- duplicate them when it shouldn't
 
     it "can pass references as type arguments" do
       baseTest [txt|

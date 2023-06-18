@@ -257,13 +257,14 @@ verifyMult _ _ _ _ = pure ()
 --
 -- Any borrowing of a variable in startCtx needs to have same borrow count at the end.
 checkStableBorrowCounts :: Span -> Ctx -> Ctx -> Tc ()
-checkStableBorrowCounts s c1 c2 = unless ([] == unstableBorrowedVars) err
+checkStableBorrowCounts s c1 c2 = unless ([] == M.keys unstableBorrowedVars) $
+  D.traceShow unstableBorrowedVars err
   where
-  err = throwError $ UnstableBorrowCounts unstableBorrowedVars s
-  unstableBorrowedVars :: [Var]
-  unstableBorrowedVars = M.keys m where
+  err = throwError $ UnstableBorrowCounts (M.keys unstableBorrowedVars) s
+  -- unstableBorrowedVars :: [Var]
+  unstableBorrowedVars = m where
     m = M.mapMaybe id $ M.intersectionWith f c1.termVars c2.termVars
-    f (i1, _) (i2, _) | i1 /= i2 = Just ()
+    f (i1, _) (i2, _) | i1 /= i2 = Just (i1, i2)
                       | otherwise = Nothing
 
 -- | Helper function for doing common work related to synthesizing
@@ -309,7 +310,7 @@ synthFunTm s mbFix polyB argB body = do
   let env = inferClosureEnv ctx1 ctx2 body
       funTy = foldr foldFunTy bodyCore.ty funInfo
       polyTy = foldr foldPolyTy funTy polyInfo
-  pure $ Core funTy s $ LamCF mbFix polyB args env bodyCore
+  pure $ Core polyTy s $ LamCF mbFix polyB args env bodyCore
   where
     foldFunTy (m, aTy, lts) bTy = Ty s $ FunTy m aTy lts bTy
     foldPolyTy (m, lts, b, k) ty = Ty s $ Univ m lts b k ty
@@ -321,7 +322,7 @@ synthFunTm s mbFix polyB argB body = do
       pure $ ((mult, vTy, lts):info, bodyCore)
     foldPoly (b, k) act = do
       (lts, mult, (polyInfo, funInfo, bodyCore)) <- mkClosureSynth s body $
-        withKind k $ act
+        withKind k act
       pure ((mult, lts, b, k):polyInfo, funInfo, bodyCore)
     requireAnno (sv, Nothing) = throwError $ SynthRequiresAnno $ sv.span
     requireAnno (sv, Just ty) = pure (sv, ty)
@@ -496,30 +497,6 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       dropVar funVar.var funVar.span
       pure bodyCore
 
-{-
-checkFun :: Span -> SVar -> Tm -> Mult -> Ty -> Ty -> Ty -> Tc Core
-checkFun s v body mult aTy lts bTy = mkClosureCheck s body mult lts do
-  addVar v.var v.span aTy
-  check bTy body
-
-checkPoly :: Span -> TyVarBinding -> Kind -> Tm -> Mult -> Ty -> Ty -> Tc Core
-checkPoly s b kind body mult lts bodyTy = mkClosureCheck s body mult lts do
-  withKind kind $ check bodyTy body
-
-checkFixTm :: Span -> Mult -> SVar -> Tm -> Ty -> Tc Core
-checkFixTm s mult funVar body bodyTy = do
-  when (mult == Single) $ throwError $ CannotFixSingle s $ getSpan bodyTy
-  withKind LtKind do
-    -- fLt is essentially static. Even if the reference escapes, the lts
-    -- stuff will keep it from being used wrong.
-    let fLt = Ty funVar.span $ LtJoin []
-        refTy = Ty funVar.span $ RefTy fLt bodyTy
-    addVar funVar.var funVar.span refTy
-    bodyCore <- check bodyTy body
-    dropVar funVar.var funVar.span
-    pure bodyCore
--}
-
 -- | Synthesize the type of a type application.
 synthAppTy :: Tm -> [Ty] -> Span -> Tc Core
 synthAppTy t1 tys s = do
@@ -543,7 +520,7 @@ synthAppTy t1 tys s = do
     k' <- kindOf tyArg
     unless (k == k') $ throwError $ ExpectedKind k k' $ getSpan tyArg
     incRef body
-    pure $ typeSub tyArg body
+    pure $ typeAppSub tyArg body
 
 synth :: Tm -> Tc Core
 synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
@@ -636,7 +613,6 @@ typeCheckFile = fmap catMaybes . mapM go where
       ty' <- indexTyVars ty
       sanityCheckType ty'
       body' <- indexTyVarsInTm body
-      D.traceM $ "body: " <> show body'
       core <- check ty' body'
       put ctx
       addModuleFun s (Var name) ty'

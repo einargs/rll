@@ -4,7 +4,7 @@ module Rll.Tc
   , lookupDataType, lookupDataCon, addDataType, addModuleFun
   , alterBorrowCount , addVar, deleteVar, withKind
   , kindOf, sanityCheckType
-  , rawTypeSub, typeSub
+  , rawTypeSub, typeSub, typeAppSub
   , lifetimeVars, lifetimeSet
   , ltSetToTypes, ltsForClosure, ltSetToVars
   , incrementLts, decrementLts, variablesBorrowing
@@ -19,7 +19,6 @@ import Rll.TypeError
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
-import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
@@ -29,7 +28,6 @@ import Data.List (foldl')
 import Safe (atMay)
 import Data.Maybe (mapMaybe)
 import Control.Exception (assert)
-import Debug.Trace qualified as D
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -124,12 +122,7 @@ kindCheck :: Kind -> Ty -> Tc ()
 kindCheck k ty = do
   k' <- kindOf ty
   unless (k==k') $ do
-    kindCtx <- gets (.localTypeVars)
-    D.traceM $ "local type var ctx: " <> show kindCtx
-    D.traceM $ "ty has wrong kind " <> show ty
-    D.traceStack ("ty has wrong kind " <> show ty) $
-      -- error $ "ty has wrong kind " <> show ty
-      throwError $ ExpectedKind k k' $ getSpan ty
+    throwError $ ExpectedKind k k' $ getSpan ty
 
 -- | Used to implement checkForRank2 and `checkForPoly`.
 checkTyForm :: (Ty -> TyErr) -> Bool -> Ty -> Tc ()
@@ -401,21 +394,30 @@ rawTypeShift i c ty@Ty{span=s, tyf} = Ty s $ case tyf of
   _ -> f <$> tyf
   where f = rawTypeShift i c
 
-typeShift :: Ty -> Ty
-typeShift = rawTypeShift 1 0
+typeShift :: Int -> Ty -> Ty
+typeShift i = rawTypeShift i 0
 
 rawTypeSub :: Int -> Ty -> Ty -> Ty
 rawTypeSub xi arg target@Ty{span=s, tyf} = case tyf of
   TyVar v@(MkTyVar _ vi) -> if vi == xi then arg else Ty s $ TyVar v
-  Univ m lts v k body -> Ty s $ Univ m (f lts) v k (rawTypeSub (xi+1) (rawTypeShift 1 0 arg) body)
+  Univ m lts v k body -> Ty s $ Univ m (f lts) v k $
+    rawTypeSub (xi+1) (typeShift 1 arg) body
   _ -> Ty s $ f <$> tyf
   where f = rawTypeSub xi arg
 
--- | Do type substitution on the body of a Univ type.
+-- | Do type substitution on a type.
 --
 -- Argument, body
 typeSub :: Ty -> Ty -> Ty
 typeSub = rawTypeSub 0
+
+-- | Do type application on the body of a `Univ` type, which
+-- requires that we then upshift to account for the lost variable.
+--
+-- Argument, body
+typeAppSub :: Ty -> Ty -> Ty
+typeAppSub arg body = typeShift (-1) $
+  typeSub (typeShift 1 arg) body
 
 -- | Creates de-brujin indices for the type variables.
 --
@@ -451,9 +453,7 @@ indexTyVarsInTm = g 0 M.empty where
           i' = i + length polyB
           toArg (v, Just vTy) = (v,) . Just <$> rawIndexTyVars i' idxMap' vTy
           toArg b = pure b
-      D.traceShowM (i', idxMap')
       argB' <- mapM toArg argB
-      D.traceShowM argB'
       t1' <- g i' idxMap' t1
       pure $ FunTm fix polyB argB' t1'
     AppTy t1 tys -> do
