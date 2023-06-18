@@ -7,11 +7,12 @@ import Data.Text qualified as T
 import Data.Text.Lazy qualified as LT
 import Errata qualified as E
 import Errata.Styles qualified as S
-import Data.Vector.Unboxed qualified as V
+import Data.Vector qualified as V
 import Prettyprinter qualified as P
 import Prettyprinter ((<+>))
 import Prettyprinter.Render.Text qualified as PRT
 import Debug.Trace qualified as D
+import Data.Maybe (mapMaybe)
 
 import Rll.Ast
 
@@ -200,13 +201,19 @@ varList = T.intercalate ", " . fmap (.name)
 -- The source text, the error message.
 prettyPrintError :: Text -> TyErr -> Text
 prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
-  lineLengths = V.fromList $ T.length <$> T.lines source
-  getColAt i = (lineLengths V.! (i-1)) + 1
+  lineLengths = V.fromList $ f <$> T.lines source where
+    f line = case T.findIndex (/=' ') line of
+      Just start -> Just (start + 1, (T.length line) + 1)
+      Nothing -> Nothing
+  getColAt i = lineLengths V.! (i-1)
 
-  spanToPtrs connect lbl ptrStyle s = f <$> [s.startLine..s.endLine] where
-    f line = E.Pointer line startCol endCol connect lbl ptrStyle where
-      startCol = if s.startLine == line then s.startColumn else 1
-      endCol = if s.endLine == line then s.endColumn else getColAt line
+  spanToPtrs connect lbl ptrStyle s = mapMaybe f [s.startLine..s.endLine] where
+    f :: Int -> Maybe E.Pointer
+    f line = g line <$> getColAt line
+    g :: Int -> (Int, Int) -> E.Pointer
+    g line (start, end) = E.Pointer line startCol endCol connect lbl ptrStyle where
+      startCol = if s.startLine == line then s.startColumn else start
+      endCol = if s.endLine == line then s.endColumn else end
 
   defaultSpanToPtrs = spanToPtrs True Nothing S.fancyRedPointer
 
