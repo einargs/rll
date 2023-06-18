@@ -10,7 +10,7 @@ import Rll.AstUtil
 import Rll.TcSpecUtil
 
 spec :: Spec
-spec = parallel do
+spec = do
   describe "type checking" do
     it "Standard context parses" do
       rawTest stdFile
@@ -457,8 +457,6 @@ spec = parallel do
         let Unit = b in c;
         |]
 
-    {- TODO: Rewrite to use function annotations on local lambdas to
-      make sure the borrow check works with univ types. -}
     it "maintains borrow counts when returning function types" do
       baseTest [txt|
         other : forall S [] l1 : Lifetime.
@@ -479,7 +477,7 @@ spec = parallel do
         Unit;
         |]
 
-    fit "can take a reference to a variable outside a closure" do
+    it "can capture references to a variable outside a checked closure" do
       baseTest [txt|
         test : Int
         = let i = Int in
@@ -491,7 +489,64 @@ spec = parallel do
         drop f in i;
         |]
 
-    fit "can capture external references in a polymorphic closure" do
+    it "can capture references to a variable outside a two argument checked closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let f = ((\x y ->
+          let Unit = y in
+          let r = &i in drop r in x)
+          : Unit -M['i]> Unit -S['i]> Unit) in
+        let Unit = &f Unit Unit in
+        let Unit = &f Unit Unit in
+        drop f in i;
+        |]
+
+    it "can copy references to a variable outside a two argument checked closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let ir = &i in
+        let f = ((\x y ->
+          let Unit = y in
+          let r = copy ir in drop r in x)
+          : Unit -M['i]> Unit -S['i]> Unit) in
+        let Unit = &f Unit Unit in
+        let Unit = &f Unit Unit in
+        drop ir in
+        drop f in i;
+        |]
+
+    it "can capture references to a variable outside a synthesized closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let ir = &i in
+        let f = (\(x:Unit) ->
+          let r = copy ir in drop r in x)
+          in
+        let Unit = &f Unit in
+        let Unit = &f Unit in
+        drop ir in
+        drop f in i;
+        |]
+
+    it "can capture references to a variable outside a two argument synthesized closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let ir = &i in
+        let f = (\(x:Unit) (y:Unit) ->
+          let Unit = y in
+          let r = copy ir in drop r in x)
+          in
+        let Unit = &f Unit Unit in
+        let Unit = &f Unit Unit in
+        drop ir in
+        drop f in i;
+        |]
+
+    it "can copy external references in a checked polymorphic closure" do
       baseTest [txt|
         test : Unit
         = let u1 = Unit in
@@ -503,12 +558,16 @@ spec = parallel do
             drop c1 in drop c2 in y)
             : forall S ['u1, 'u2] t : Type.
             t -S['u1, 'u2]> t) in
-        let final = other in
+        let final = other [Int] in
         let Int = final Int in
+        drop r1 in drop r2 in
         let Unit = u1 in
         let Unit = u2 in
         Unit;
         |]
+
+    -- TODO: make sure the external references capture bug fix works for multiple
+    -- lambdas.
 
     -- TODO: doesn't allow multi-use univ around single use functions that can
     -- duplicate them when it shouldn't

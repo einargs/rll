@@ -38,10 +38,12 @@ Thoughts
 - [X] Write name mangler.
 - [X] Just go ahead and fully specialize the types now. `Imp` can use the same data
   structures probably, and this is the specialization stage.
+- [X] Fix the broken tests for type checking after syntax changed.
+- [X] Make the changes to the commented out test.
+- [ ] Write the tests that I have as TODO and the relevant ones in the future tests section.
 - [ ] When synthesizing function types I need to make sure that I don't automatically make
   all Univ `Many`, because then a single-use context can be duplicated.
-- [ ] Fix the broken tests for type checking after syntax changed.
-  - [ ] Make the changes to the commented out test.
+- [ ] Add tests for closure environments in `Core`.
 - [ ] Clean up commented out code in `TypeCheck.hs`.
 - [ ] Add an error to `TypeCheck.hs` that requires that we have a `main` entry point
   in each module that I can start specializing from.

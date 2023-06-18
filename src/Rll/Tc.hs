@@ -28,6 +28,7 @@ import Data.List (foldl')
 import Safe (atMay)
 import Data.Maybe (mapMaybe)
 import Control.Exception (assert)
+import Debug.Trace qualified as D
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
   deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
@@ -204,7 +205,9 @@ addModuleFun s name ty = do
   put $ ctx {moduleFuns=M.insert name ty ctx.moduleFuns}
 
 alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
-alterBorrowCount v f = modify' $ onTermVars $ M.adjust (first f) v
+alterBorrowCount v f = do
+  D.traceM $ "altering " <> show v <> " by " <> show (f 0)
+  modify' $ onTermVars $ M.adjust (first f) v
   -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 addVar :: Var -> Span -> Ty -> Tc ()
@@ -358,6 +361,12 @@ variablesBorrowing v = do
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
+  D.traceM $ "Dropping " <> show v <> " borrow count " <> show borrowCount <> " ty " <> show ty
+  case ty.tyf of
+    RefTy (Ty _ (LtOf p)) _ -> do
+      (parentCount, _) <- lookupEntry p s
+      D.traceM $ "Parent " <> show p <> " borrow count " <> show parentCount
+    _ -> pure ()
   unless (borrowCount == 0) $ do
     borrowers <- variablesBorrowing v
     throwError $ CannotDropBorrowedVar v borrowers s
@@ -366,6 +375,11 @@ dropVar v s = do
     Univ Many l _ _ _ -> decrementLts l
     FunTy Many _ l _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
+  case ty.tyf of
+    RefTy (Ty _ (LtOf p)) _ -> do
+      (parentCount, _) <- lookupEntry p s
+      D.traceM $ "END: parent " <> show p <> " borrow count " <> show parentCount
+    _ -> pure ()
   deleteVar v s
 
 -- | Utility function for decrementing the borrow count of the referenced variable

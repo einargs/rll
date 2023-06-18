@@ -257,8 +257,8 @@ verifyMult _ _ _ _ = pure ()
 --
 -- Any borrowing of a variable in startCtx needs to have same borrow count at the end.
 checkStableBorrowCounts :: Span -> Ctx -> Ctx -> Tc ()
-checkStableBorrowCounts s c1 c2 = unless ([] == M.keys unstableBorrowedVars) $
-  D.traceShow unstableBorrowedVars err
+checkStableBorrowCounts s c1 c2 = D.traceShow unstableBorrowedVars $
+  unless ([] == M.keys unstableBorrowedVars) $ err
   where
   err = throwError $ UnstableBorrowCounts (M.keys unstableBorrowedVars) s
   -- unstableBorrowedVars :: [Var]
@@ -277,7 +277,6 @@ mkClosureSynth s body m = do
   let lts = Ty s $ LtJoin $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s startCtx endCtx
-  incrementLts lts
   pure $ (lts, mult, out)
 
 -- | Calculate what variables a closure needs from the context.
@@ -310,6 +309,7 @@ synthFunTm s mbFix polyB argB body = do
   let env = inferClosureEnv ctx1 ctx2 body
       funTy = foldr foldFunTy bodyCore.ty funInfo
       polyTy = foldr foldPolyTy funTy polyInfo
+  incrementLtsIn polyTy
   pure $ Core polyTy s $ LamCF mbFix polyB args env bodyCore
   where
     foldFunTy (m, aTy, lts) bTy = Ty s $ FunTy m aTy lts bTy
@@ -326,23 +326,6 @@ synthFunTm s mbFix polyB argB body = do
       pure ((mult, lts, b, k):polyInfo, funInfo, bodyCore)
     requireAnno (sv, Nothing) = throwError $ SynthRequiresAnno $ sv.span
     requireAnno (sv, Just ty) = pure (sv, ty)
-
-{-
-synthFun :: Span -> SVar -> Ty -> Tm -> Tc Core
-synthFun s v vTy body = do
-  (lts, mult, bodyCore) <- mkClosureSynth s body do
-    addVar v.var v.span vTy
-    synth body
-  let ty = FunTy mult vTy lts bodyCore.ty s
-  pure $ Core ty s $ extendLam v vTy bodyCore
-
-synthPoly :: Span -> TyVarBinding -> Kind -> Tm -> Tc Core
-synthPoly s b kind body = do
-  (lts, mult, bodyCore) <- mkClosureSynth s body $
-    withKind kind $ synth body
-  let ty = Univ mult lts b kind bodyCore.ty s
-  pure $ Core ty s $ extendPoly b kind bodyCore
--}
 
 -- | This is an additional check to catch compiler logic errors. It is
 -- not enough on it's own.
@@ -363,8 +346,8 @@ verifyBorrows s startCtx endCtx lts body = do
   let vars = ltSetToVars inferredLtSet
   unless (ltsSet == inferredLtSet) $ throwError $
     IncorrectBorrowedVars lts (ltSetToTypes inferredLtSet) s
-  incrementLts lts
-  -- forM_ vars $ flip alterBorrowCount (+1)
+  -- We need this because using a closure decrements these lts
+  -- variables. And to make sure that we've marked them as being borrowed.
   where
     inferredLtSet = ltsForClosure startCtx endCtx body
 
@@ -372,8 +355,10 @@ verifyBorrows s startCtx endCtx lts body = do
 mkClosureCheck :: Span -> Tm -> Mult -> Ty -> Tc a -> Tc a
 mkClosureCheck s body mult lts m = do
   startCtx <- get
+  D.traceM $ "start context " <> show startCtx.termVars
   val <- m
   endCtx <- get
+  D.traceM $ "end context " <> show endCtx.termVars
 
   -- Check specified lifetimes
   verifyBorrows s startCtx endCtx lts body
@@ -385,39 +370,11 @@ mkClosureCheck s body mult lts m = do
 
   pure val
 
-  {-
-  FunTm v mbVTy body s ->
-    case ty of
-      FunTy m aTy lts bTy _ -> do
-        checkBorrowList lts s
-        case mbVTy of
-          Just vTy -> unless (vTy == aTy) $ throwError $ ExpectedType aTy vTy
-          Nothing -> pure ()
-        bodyCore <- checkFun s v body m aTy lts bTy
-        cf $ extendLam v aTy bodyCore
-      _ -> throwError $ ExpectedFunType ty s
-  Poly mbBind body s1 ->
-    case ty of
-      Univ m lts b2 k2 bodyTy s2 -> do
-        checkBorrowList lts s1
-        forM_ mbBind \(b1,k1) -> do
-          -- NOTE I don't know if this should check text name.
-          unless (b1.name == b2.name) $ throwError $ TypeVarBindingMismatch b1 s1 b2 s2
-          unless (k1 == k2) $ throwError $ TypeKindBindingMismatch k1 s1 k2 s2
-        bodyCore <- checkPoly s1 b2 k2 body m lts bodyTy
-        cf $ extendPoly b2 k2 bodyCore
-      _ -> throwError $ ExpectedUnivType ty s1
-  FixTm funVar body s1 -> do
-    bodyCore <- case ty of
-      FunTy m xTy lts bodyTy s2 -> do
-        checkBorrowList lts s1
-        checkFixTm s1 m funVar body ty
-      Univ m lts bind kind bodyTy s2 -> do
-        checkBorrowList lts s1
-        checkFixTm s1 m funVar body ty
-      _ -> throwError $ ExpectedFixableType ty s1
-    cf $ extendFix funVar bodyCore
-  -}
+incrementLtsIn :: Ty -> Tc ()
+incrementLtsIn ty = case ty.tyf of
+  Univ _ lts _ _ _ -> incrementLts lts
+  FunTy _ _ lts _ -> incrementLts lts
+  _ -> error "Should only be called on stuff we know will be a function"
 
 checkFunTm :: Span -> Maybe SVar -> [(TyVarBinding, Kind)]
   -> [(SVar, Maybe Ty)] -> Tm -> Ty -> Tc Core
@@ -438,13 +395,15 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       ctx1 <- get
       (args, bodyCore) <- foldr foldLayer (cont baseTy) polyLayers
       ctx2 <- get
+      incrementLtsIn fullTy
       let env = inferClosureEnv ctx1 ctx2 body
           tyArgs' = (\(_,_,b,k,_) -> (b,k)) <$> polyLayers
+      D.traceM $ "env " <> show env
       pure $ Core fullTy s $ LamCF mbFix tyArgs' args env bodyCore
       where
         foldLayer :: (Mult, Ty, TyVarBinding, Kind, Span)
           -> Tc ([(SVar, Ty)], Core) -> Tc ([(SVar, Ty)], Core)
-        foldLayer (m, lts, b, k, s2) act =
+        foldLayer (m, lts, b, k, s2) act = do
           mkClosureCheck s body m lts $ withKind k act
         -- | We pull out a list of all the important information about layered
         -- Univ types.
@@ -469,7 +428,7 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       let args' = fmap (\(v,_,vTy,_,_) -> (v,vTy)) layers
       pure (args', bodyCore)
       where
-        foldLayer (v, m, vTy, lts, tySpan) act =
+        foldLayer (v, m, vTy, lts, tySpan) act = do
           mkClosureCheck s body m lts do
             addVar v.var v.span vTy
             act
