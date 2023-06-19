@@ -25,8 +25,8 @@ data TyErr
   | UnknownTermVar Var Span
   -- | We know the term var was used/dropped.
   --
-  -- Current usage span, where it was used/dropped
-  | RemovedTermVar Span Span
+  -- Variable, current usage span, where it was used/dropped
+  | RemovedTermVar Var Span Span
   -- | Referenced an undefined datatype.
   | UnknownDataType Var Span
   -- | The introduction of a new variable would shadow an existing one.
@@ -253,8 +253,8 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       (spanToPtrs True Nothing S.fancyRedPointer s)
       Nothing
 
-    RemovedTermVar use dropped ->
-      E.Errata (Just "Term variable was used after being used/dropped")
+    RemovedTermVar v use dropped ->
+      E.Errata (Just $ ptext $ "Term variable" <+> P.pretty v <+> "was used after being used/dropped")
       [ simpleBlock use "Used here"
       , simpleBlock dropped "Removed here"
       ] Nothing

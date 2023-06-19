@@ -308,7 +308,7 @@ spec = do
         |]
 
     it "can catch a reference used after being dropped" do
-      baseFailTest (RemovedTermVar es es) [txt|
+      baseFailTest (RemovedTermVar (Var "b") es es) [txt|
         test : Int -M[]> Int
         = \a -> let b = &a in
         drop b in
@@ -323,7 +323,7 @@ spec = do
         |]
 
     it "can catch using an already used variable" do
-      baseFailTest (RemovedTermVar es es) [txt|
+      baseFailTest (RemovedTermVar (Var "a") es es) [txt|
         test : Unit -M[]> Unit
         = \a-> let Unit = a in a;
         |]
@@ -477,7 +477,7 @@ spec = do
         Unit;
         |]
 
-    it "can capture references to a variable outside a checked closure" do
+    it "can capture references to a variable outside a closure" do
       baseTest [txt|
         test : Int
         = let i = Int in
@@ -489,7 +489,18 @@ spec = do
         drop f in i;
         |]
 
-    it "can capture references to a variable outside a two argument checked closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let f = (\(x:Unit) ->
+          let r = &i in drop r in x)
+          in
+        let Unit = &f Unit in
+        let Unit = &f Unit in
+        drop f in i;
+        |]
+
+    it "can capture references to a variable outside a two argument closure" do
       baseTest [txt|
         test : Int
         = let i = Int in
@@ -502,7 +513,18 @@ spec = do
         drop f in i;
         |]
 
-    it "can copy references to a variable outside a two argument checked closure" do
+      baseTest [txt|
+        test : Int
+        = let i = Int in
+        let f = (\(x: Unit) (y:Unit) ->
+          let Unit = y in
+          let r = &i in drop r in x) in
+        let Unit = &f Unit Unit in
+        let Unit = &f Unit Unit in
+        drop f in i;
+        |]
+
+    it "can copy references to a variable outside a two argument closure" do
       baseTest [txt|
         test : Int
         = let i = Int in
@@ -517,36 +539,20 @@ spec = do
         drop f in i;
         |]
 
-    it "can capture references to a variable outside a synthesized closure" do
-      baseTest [txt|
-        test : Int
-        = let i = Int in
-        let ir = &i in
-        let f = (\(x:Unit) ->
-          let r = copy ir in drop r in x)
-          in
-        let Unit = &f Unit in
-        let Unit = &f Unit in
-        drop ir in
-        drop f in i;
-        |]
-
-    it "can capture references to a variable outside a two argument synthesized closure" do
       baseTest [txt|
         test : Int
         = let i = Int in
         let ir = &i in
         let f = (\(x:Unit) (y:Unit) ->
           let Unit = y in
-          let r = copy ir in drop r in x)
-          in
+          let r = copy ir in drop r in x) in
         let Unit = &f Unit Unit in
         let Unit = &f Unit Unit in
         drop ir in
         drop f in i;
         |]
 
-    it "can copy external references in a checked polymorphic closure" do
+    it "can copy external references in a polymorphic closure" do
       baseTest [txt|
         test : Unit
         = let u1 = Unit in
@@ -566,8 +572,194 @@ spec = do
         Unit;
         |]
 
-    -- TODO: make sure the external references capture bug fix works for multiple
-    -- lambdas.
+      baseTest [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let r1 = &u1 in let r2 = &u2 in
+        let other =
+          (\[t:Type] (y:t) ->
+            let c1 = copy r1 in let c2 = copy r2 in
+            drop c1 in drop c2 in y) in
+        let final = other [Int] in
+        let Int = final Int in
+        drop r1 in drop r2 in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+
+    it "can return a captured reference in a closure" do
+      baseTest [txt|
+        test : Unit
+        = let u = Unit in
+        let mkRef = (\(x:Unit) (y:Unit) (z:Unit) ->
+          let Unit = z in
+          let Unit = x in
+          let Unit = y in &u) in
+        let ur = mkRef Unit Unit Unit in
+        drop ur in
+        u;
+        |]
+
+      baseTest [txt|
+        test : Unit
+        = let u = Unit in
+        let mkRef = (\x y z ->
+          let Unit = z in
+          let Unit = x in
+          let Unit = y in &u)
+          : Unit -M['u]> Unit -S['u]> Unit -S['u]> &'u Unit
+        in
+        let ur = mkRef Unit Unit Unit in
+        drop ur in
+        u;
+        |]
+
+    it "correctly drops multi-use functions" do
+      baseFailTest (RemovedTermVar (Var "f") es es) [txt|
+        test : Unit
+        = let f = (\(x:Unit) -> x) in
+        let Unit = f Unit in
+        drop f in
+        Unit;
+        |]
+
+      baseTest [txt|
+        test : Unit
+        = let f = (\(x:Unit) -> x) in
+        let Unit = &f Unit in
+        drop f in
+        Unit;
+        |]
+
+    it "can take a function that captures references as an argument" do
+      -- TODO write a version that does checked lambdas
+      baseTest [txt|
+        test : Unit
+        = let u = Unit in
+        let argF = (\x -> let r = &u in drop r in x)
+          : Unit -M['u]> Unit in
+        let argF2 = (\x -> let r = &u in drop r in x)
+          : Unit -M['u]> Unit in
+        let useArgF = (\f -> f Unit)
+          : (Unit -M['u]> Unit) -M[]> Unit in
+        let holdArgF = (\f x ->
+          let Unit = x in f Unit)
+          : (Unit -M['u]> Unit) -M[]> Unit -S['u]> Unit in
+        let Unit = &argF Unit in
+        let Unit = useArgF argF in
+        let hold = holdArgF argF2 in
+        let Unit = hold Unit in
+        u;
+        |]
+
+    it "can take a function that captures references as an argument in synthesized lambda" do
+      baseTest [txt|
+        test : Unit
+        = let u = Unit in
+        let argF = (\(x:Unit) -> let r = &u in drop r in x) in
+        let argF2 = (\(x:Unit) -> let r = &u in drop r in x) in
+        let useArgF = \(f:Unit -M['u]> Unit) -> f Unit in
+        let holdArgF = \(f:Unit -M['u]> Unit) (x:Unit) ->
+          let Unit = x in f Unit in
+        let Unit = &argF Unit in
+        let Unit = useArgF argF in
+        let hold = holdArgF argF2 in
+        let Unit = hold Unit in
+        u;
+        |]
+
+    -- TODO: it "can capture a reference to a multi-use function" do
+
+    it "can return a captured reference in a struct" do
+      -- synthesized
+      baseTest [txt|
+        struct Holder (a:Type) { a }
+
+        test : Unit
+        = let u = Unit in
+        let mkRef = (\(x:Unit) (y:Unit) (z:Unit) ->
+          let Unit = z in
+          let Unit = x in
+          let ur = &u in
+          let Unit = y in Holder [&'u Unit] ur) in
+        let Holder ur = mkRef Unit Unit Unit in
+        drop ur in
+        u;
+        |]
+
+      -- checked
+      baseTest [txt|
+        struct Holder (a:Type) { a }
+
+        test : Unit
+        = let u = Unit in
+        let mkRef = (\x y z ->
+          let Unit = z in
+          let Unit = x in
+          let Unit = y in Holder [&'u Unit] &u)
+          : Unit -M['u]> Unit -S['u]> Unit -S['u]> Holder (&'u Unit) in
+        let Holder ur = mkRef Unit Unit Unit in
+        drop ur in
+        u;
+        |]
+
+    it "move an external reference from one lambda into a nested lambda" do
+      -- note that dropping `c1` is the same as moving it.
+      baseTest [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let other = ((\u -> let c1 = &u1 in
+          \y -> let Unit = u in
+            let c2 = &u2 in
+            drop c1 in drop c2 in y)
+          : forall M ['u1, 'u2] t : Type.
+            Unit -M['u1, 'u2]> t -S['u1,'u2]> t) in
+        let Int = other [Int] Unit Int in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+      baseTest [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let other = ((\u -> let c1 = &u1 in
+          \y -> let c1c = c1 in
+            let Unit = u in
+            let c2 = &u2 in
+            drop c1c in drop c2 in y)
+          : forall M ['u1, 'u2] t : Type.
+            Unit -M['u1, 'u2]> t -S['u1,'u2]> t) in
+        let Int = other [Int] Unit Int in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+      baseFailTest (VarsEscapingScope [Var "c1"] es) [txt|
+        test : Unit
+        = let u1 = Unit in
+        let u2 = Unit in
+        let other = ((\u -> let c1 = &u1 in
+          \y -> let Unit = u in
+            let c2 = &u2 in
+            drop c2 in y)
+          : forall M ['u1, 'u2] t : Type.
+            Unit -M['u1, 'u2]> t -S['u2]> t) in
+        let Int = other [Int] Unit Int in
+        let Unit = u1 in
+        let Unit = u2 in
+        Unit;
+        |]
+
+    -- TODO: make sure passing a unit to a closure that has captured a reference to it
+    -- doesn't work.
+    -- it "can move a structure containing a lifetime into a closure" do
 
     -- TODO: doesn't allow multi-use univ around single use functions that can
     -- duplicate them when it shouldn't
@@ -780,6 +972,7 @@ spec = do
         |]
 
     it "can take a type operator as a kind argument" do
+      -- TODO: I think the error is coming from the partial application???
       baseTest [txt|
         enum ListF (a:Type) (b:Type)
           = NilF

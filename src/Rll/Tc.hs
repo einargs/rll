@@ -2,11 +2,11 @@ module Rll.Tc
   ( Tc(..), runTc, evalTc
   , expectedTermVar, lookupEntry, lookupVar, lookupKind
   , lookupDataType, lookupDataCon, addDataType, addModuleFun
-  , alterBorrowCount , addVar, deleteVar, withKind
+  , alterBorrowCount, addVar, deleteVar, withKind
   , kindOf, sanityCheckType
   , rawTypeSub, typeSub, typeAppSub
   , lifetimeVars, lifetimeSet
-  , ltSetToTypes, ltsForClosure, ltSetToVars
+  , ltSetToTypes, ltsForClosure, ltSetToVars, ltsInTy
   , incrementLts, decrementLts, variablesBorrowing
   , dropVar, useRef, incRef
   , rawIndexTyVars, indexTyVars, indexTyVarsInTm
@@ -19,6 +19,7 @@ import Rll.TypeError
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
+import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
 import qualified Data.HashSet as S
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
@@ -45,7 +46,7 @@ expectedTermVar v s = do
   vl <- gets (.varLocs)
   throwError $ case M.lookup v vl of
     Just (_,Nothing) -> CompilerLogicError "varLocs not in synch with termVars" (Just s)
-    Just (_,Just removedSpan) -> RemovedTermVar s removedSpan
+    Just (_,Just removedSpan) -> RemovedTermVar v s removedSpan
     Nothing -> UnknownTermVar v s
 
 lookupEntry :: Var -> Span -> Tc (Int, Ty)
@@ -204,10 +205,18 @@ addModuleFun s name ty = do
     Nothing -> pure ()
   put $ ctx {moduleFuns=M.insert name ty ctx.moduleFuns}
 
-alterBorrowCount :: Var -> (Int -> Int) -> Tc ()
-alterBorrowCount v f = do
-  D.traceM $ "altering " <> show v <> " by " <> show (f 0)
-  modify' $ onTermVars $ M.adjust (first f) v
+alterBorrowCount :: Int -> Var -> Tc ()
+alterBorrowCount i v = do
+  -- TODO
+  (sc,_) <- lookupEntry v undefined
+  D.traceM $ "altering " <> show v <> " by " <> show i <> " from " <> show sc
+  modify' $ onTermVars $ M.adjust (first (+i)) v
+  when (sc + i < 0) $ do
+    let ts :: Show a => a -> Text
+        ts = T.pack . show
+        msg = "subzero borrow count " <> show (sc+i) <> " for " <> show v
+    D.traceM msg
+    -- throwError $ CompilerLogicError msg Nothing
   -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 addVar :: Var -> Span -> Ty -> Tc ()
@@ -230,7 +239,7 @@ addVar v s ty = do
 deleteVar :: Var -> Span -> Tc ()
 deleteVar v s = modify' \c ->
   c{termVars=M.delete v c.termVars
-   ,varLocs=M.adjust addDropLoc v c.varLocs}
+  ,varLocs=M.adjust addDropLoc v c.varLocs}
   where addDropLoc (s1,_) = (s1, Just s)
 
 -- | Utility function to add and drop kinds from the type context automatically.
@@ -289,7 +298,10 @@ lifetimeSet Ty{span, tyf} = case tyf of
       _ -> throwError $ ExpectedKind LtKind k span
   _ -> throwError $ ExpectedKind LtKind TyKind span
 
--- | Get a set of all lifetimes mentioned in a type relative to the context.
+-- | Get a set of all lifetimes referenced in a type relative to the context.
+--
+-- Specifically, this means that we do not add lifetimes in the input or output
+-- of functions or in the body of a reference type.
 --
 -- It's important that the context type variable indices line up with those
 -- in the type.
@@ -301,10 +313,15 @@ ltsInTy ctx typ = S.fromList $ f typ [] where
       LtKind -> (s, Left tv):l
       TyKind -> l
       TyOpKind _ _ -> l
+    FunTy _ _ lts _ -> f lts l
+    Univ _ lts _ _ _ -> f lts l
+    RefTy lt _ -> f lt l
     _ -> foldr f l tyf
-  getKind (MkTyVar _ i) = case atMay ctx.localTypeVars i of
+  getKind tv@(MkTyVar n i) = case atMay ctx.localTypeVars i of
     Just k -> k
-    Nothing -> error "Should have been caught already"
+    Nothing -> error $ "type variable " <> show tv
+      <> " has no kind in context " <> show ctx.localTypeVars
+      <> "\nFound in type " <> show typ <> " span " <> show typ.span
 
 -- | Get all lifetimes implied by borrows and copies inside a closure.
 --
@@ -332,15 +349,23 @@ ltsInConsumed c1 c2 = S.unions ltSets where
 ltsForClosure :: Ctx -> Ctx -> Tm -> LtSet
 ltsForClosure c1 c2 tm = S.union (ltsInConsumed c1 c2) $ ltsBorrowedIn c1 tm
 
+-- | Add the value to the variables referenced in the type.
+--
+-- This means that it doesn't include the input and output of functions.
+adjustRef :: Int -> Ty -> Tc ()
+adjustRef i ty = do
+  ctx <- get
+  forM_ (ltSetToVars $ ltsInTy ctx ty) $ alterBorrowCount i
+
 -- | Modify the borrow count for the variables in the mentioned lifetime variables.
-adjustLts :: (Int -> Int) -> Ty -> Tc ()
-adjustLts f lty = lifetimeVars lty >>= mapM_ (flip alterBorrowCount f)
+adjustLts :: Int -> Ty -> Tc ()
+adjustLts i lty = lifetimeVars lty >>= mapM_ (alterBorrowCount i)
 
 decrementLts :: Ty -> Tc ()
-decrementLts = adjustLts $ subtract 1
+decrementLts = adjustLts (-1)
 
 incrementLts :: Ty -> Tc ()
-incrementLts = adjustLts (+1)
+incrementLts = adjustLts 1
 
 -- | Does the type use the lifetime of this variable?
 isTyBorrowing :: Var -> Ty -> Bool
@@ -385,21 +410,13 @@ dropVar v s = do
 -- | Utility function for decrementing the borrow count of the referenced variable
 -- when we consume a reference term.
 useRef :: Ty -> Tc ()
-useRef ty = do
-  case ty.tyf of
-    RefTy l _ -> decrementLts l
-    -- NOTE: figure out why this doesn't need to decrement function lts borrows and
-    -- write a test.
-    -- OLD: This should be decrementing function borrows right?
-    _ -> pure ()
+useRef = adjustRef (-1)
 
--- | Used to increment borrow counts if the return of a function increments them.
+-- | Increments the borrow counts of all lifetimes referenced in the type.
+--
+-- This means it does not include lifetimes in the input or output of functions.
 incRef :: Ty -> Tc ()
-incRef ty = case ty.tyf of
-  RefTy l _ -> incrementLts l
-  FunTy _ _ lts _ -> incrementLts lts
-  Univ _ lts _ _ _ -> incrementLts lts
-  _ -> pure ()
+incRef = adjustRef 1
 
 rawTypeShift :: Int -> Int -> Ty -> Ty
 rawTypeShift i c ty@Ty{span=s, tyf} = Ty s $ case tyf of

@@ -24,7 +24,7 @@ createVarRef v s = do
   case t.tyf of
     RefTy _ _ -> throwError $ CannotRefOfRef t s
     _ -> pure ()
-  alterBorrowCount v (+1)
+  alterBorrowCount 1 v
   -- NOTE I'm pretty sure using this span makes sense, but check.
   pure $ Ty s $ RefTy (Ty s $ LtOf v) t
 
@@ -112,7 +112,7 @@ addPartialBorrowVar v s lt bTy = do
   let ty = toRef s lt bTy
   addVar v s ty
   case ty.tyf of
-    RefTy (Ty _ (LtOf v')) _ -> alterBorrowCount v' (+1)
+    RefTy (Ty _ (LtOf v')) _ -> alterBorrowCount 1 v'
     RefTy (Ty _ (TyVar _)) _ -> pure ()
     RefTy lt@(Ty _ (LtJoin _)) _ -> throwError $ RefLtIsComposite lt s
     RefTy lt _ -> throwError $ ExpectedKind LtKind TyKind $ getSpan lt
@@ -140,7 +140,7 @@ caseClause caseSpan t1 branches tcMethod = do
   t1Core@Core{ty=t1Ty} <- synth t1
   cores <- case t1Ty.tyf of
     RefTy lt enumTy -> do
-      useRef t1Ty
+      decrementLts lt
       (tyName,conMap) <- ensureEnum enumTy
       let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
       joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
@@ -212,7 +212,7 @@ letStructClause letSpan structCon memberVars t1 body method = do
   t1Core@Core{ty=t1Ty} <- synth t1
   bodyCore <- case t1Ty.tyf of
     RefTy lt structTy -> do
-      useRef t1Ty
+      decrementLts lt
       let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
       handle f structTy
     _ -> do
@@ -233,6 +233,7 @@ letStructClause letSpan structCon memberVars t1 body method = do
 
 letClause :: Span -> SVar -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letClause s x t1 t2 f = do
+  D.traceM $ "entered let " <> show x
   t1Core <- synth t1
   addVar x.var s t1Core.ty
   t2Core <- f t2
@@ -256,27 +257,44 @@ verifyMult _ _ _ _ = pure ()
 -- | Checks to make sure borrows and drops are balanced in a function definition.
 --
 -- Any borrowing of a variable in startCtx needs to have same borrow count at the end.
-checkStableBorrowCounts :: Span -> Ctx -> Ctx -> Tc ()
-checkStableBorrowCounts s c1 c2 = D.traceShow unstableBorrowedVars $
+checkStableBorrowCounts :: Span -> [(Var,Span,Ty)] -> Ctx -> Ctx -> Tc ()
+checkStableBorrowCounts s addedVars c1 c2 = D.trace ("unstableVars " <> show unstableBorrowedVars) $
   unless ([] == M.keys unstableBorrowedVars) $ err
   where
+  argTys = (\(_,_,ty) -> ty) <$> addedVars
+  movedVarTys = M.elems $ M.map snd $ M.difference c1.termVars c2.termVars
+  -- Arguments and moving variables into the context both increase the borrow counts.
+  addedVarTys = movedVarTys
+  addedVarCounts = D.trace ("addedVarCounts " <> show m) $ m where
+    m = foldl' (M.unionWith (+)) M.empty $ f <$> addedVarTys
+    f = M.fromList . fmap (,1) . ltSetToVars . ltsInTy c1
+  -- compensated for the added variables
+  c1MinusAdded = M.mapWithKey f c1.termVars where
+    f k (count,ty) = case M.lookup k addedVarCounts of
+      Just c' -> (count - c', ty)
+      Nothing -> (count, ty)
   err = throwError $ UnstableBorrowCounts (M.keys unstableBorrowedVars) s
   -- unstableBorrowedVars :: [Var]
   unstableBorrowedVars = m where
-    m = M.mapMaybe id $ M.intersectionWith f c1.termVars c2.termVars
+    m = M.mapMaybe id $ M.intersectionWith f c1MinusAdded c2.termVars
     f (i1, _) (i2, _) | i1 /= i2 = Just (i1, i2)
                       | otherwise = Nothing
 
 -- | Helper function for doing common work related to synthesizing
 -- closure types.
-mkClosureSynth :: Span -> Tm -> Tc a -> Tc (Ty, Mult, a)
-mkClosureSynth s body m = do
+mkClosureSynth :: Span -> Tm -> [(Var, Span, Ty)] -> Tc a -> Tc (Ty, Mult, a)
+mkClosureSynth s body addVars act = do
   startCtx <- get
-  out <- m
+  D.traceM $ "start context " <> show startCtx.termVars
+  forM_ addVars \(v,s,ty) -> do
+    addVar v s ty
+    incRef ty
+  out <- act
   endCtx <- get
+  D.traceM $ "end context " <> show endCtx.termVars
   let lts = Ty s $ LtJoin $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
-  checkStableBorrowCounts s startCtx endCtx
+  checkStableBorrowCounts s addVars startCtx endCtx
   pure $ (lts, mult, out)
 
 -- | Calculate what variables a closure needs from the context.
@@ -300,8 +318,11 @@ synthFunTm s mbFix polyB argB body = do
     Just _ -> throwError $ CannotSynthFixTm s
     Nothing -> pure ()
   args <- mapM requireAnno argB
-  let initWrap core = ([], core)
-      funM = foldr foldArg (initWrap <$> synth body) args
+  let start = do
+        core <- synth body
+        useRef core.ty
+        pure ([], core)
+      funM = foldr foldArg start args
       initPoly (funInfo, core) = ([], funInfo, core)
   ctx1 <- get
   (polyInfo, funInfo, bodyCore) <- foldr foldPoly (initPoly <$> funM) polyB
@@ -309,20 +330,19 @@ synthFunTm s mbFix polyB argB body = do
   let env = inferClosureEnv ctx1 ctx2 body
       funTy = foldr foldFunTy bodyCore.ty funInfo
       polyTy = foldr foldPolyTy funTy polyInfo
-  incrementLtsIn polyTy
+  incRef polyTy
   pure $ Core polyTy s $ LamCF mbFix polyB args env bodyCore
   where
     foldFunTy (m, aTy, lts) bTy = Ty s $ FunTy m aTy lts bTy
     foldPolyTy (m, lts, b, k) ty = Ty s $ Univ m lts b k ty
     foldArg :: (SVar, Ty) -> Tc ([(Mult, Ty, Ty)], Core) -> Tc ([(Mult, Ty, Ty)], Core)
     foldArg (v, vTy) act = do
-      (lts, mult, (info, bodyCore)) <- mkClosureSynth s body do
-        addVar v.var v.span vTy
-        act
+      (lts, mult, (info, bodyCore)) <-
+        mkClosureSynth s body [(v.var, v.span, vTy)] act
       pure $ ((mult, vTy, lts):info, bodyCore)
     foldPoly (b, k) act = do
-      (lts, mult, (polyInfo, funInfo, bodyCore)) <- mkClosureSynth s body $
-        withKind k act
+      (lts, mult, (polyInfo, funInfo, bodyCore)) <-
+        mkClosureSynth s body [] $ withKind k act
       pure ((mult, lts, b, k):polyInfo, funInfo, bodyCore)
     requireAnno (sv, Nothing) = throwError $ SynthRequiresAnno $ sv.span
     requireAnno (sv, Just ty) = pure (sv, ty)
@@ -352,10 +372,13 @@ verifyBorrows s startCtx endCtx lts body = do
     inferredLtSet = ltsForClosure startCtx endCtx body
 
 -- | Helper for building closure checks.
-mkClosureCheck :: Span -> Tm -> Mult -> Ty -> Tc a -> Tc a
-mkClosureCheck s body mult lts m = do
+mkClosureCheck :: Span -> Tm -> Mult -> Ty -> [(Var, Span, Ty)] -> Tc a -> Tc a
+mkClosureCheck s body mult lts addVars m = do
   startCtx <- get
   D.traceM $ "start context " <> show startCtx.termVars
+  forM_ addVars \(v,s,ty) -> do
+    addVar v s ty
+    incRef ty
   val <- m
   endCtx <- get
   D.traceM $ "end context " <> show endCtx.termVars
@@ -366,23 +389,16 @@ mkClosureCheck s body mult lts m = do
   -- Check multiplicity if Many is specified
   verifyMult s mult startCtx endCtx
 
-  checkStableBorrowCounts s startCtx endCtx
+  checkStableBorrowCounts s addVars startCtx endCtx
 
   pure val
-
--- | Increment the borrow counts of captured lifetimes in the closure
--- type passed.
-incrementLtsIn :: Ty -> Tc ()
-incrementLtsIn ty = case ty.tyf of
-  Univ _ lts _ _ _ -> incrementLts lts
-  FunTy _ _ lts _ -> incrementLts lts
-  _ -> error "Should only be called on stuff we know will be a function"
 
 checkFunTm :: Span -> Maybe SVar -> [(TyVarBinding, Kind)]
   -> [(SVar, Maybe Ty)] -> Tm -> Ty -> Tc Core
 checkFunTm s mbFix polyB argB body ty = withFix mbFix $
-  withPoly polyB ty $ withArgs argB $ flip check body
+  withPoly polyB ty $ withArgs argB $ startCont
   where
+    startCont ty = check ty body <* useRef ty
     withPoly :: [(TyVarBinding, Kind)] -> Ty -> (Ty -> Tc ([(SVar, Ty)], Core)) -> Tc Core
     withPoly tyArgs fullTy cont = do
       let (baseTy, polyLayers) = extractPolyLayers fullTy
@@ -397,7 +413,7 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       ctx1 <- get
       (args, bodyCore) <- foldr foldLayer (cont baseTy) polyLayers
       ctx2 <- get
-      incrementLtsIn fullTy
+      incRef fullTy
       let env = inferClosureEnv ctx1 ctx2 body
           tyArgs' = (\(_,_,b,k,_) -> (b,k)) <$> polyLayers
       D.traceM $ "env " <> show env
@@ -406,7 +422,7 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
         foldLayer :: (Mult, Ty, TyVarBinding, Kind, Span)
           -> Tc ([(SVar, Ty)], Core) -> Tc ([(SVar, Ty)], Core)
         foldLayer (m, lts, b, k, s2) act = do
-          mkClosureCheck s body m lts $ withKind k act
+          mkClosureCheck s body m lts [] $ withKind k act
         -- | We pull out a list of all the important information about layered
         -- Univ types.
         extractPolyLayers :: Ty -> (Ty, [(Mult, Ty, TyVarBinding, Kind, Span)])
@@ -430,10 +446,8 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       let args' = fmap (\(v,_,vTy,_,_) -> (v,vTy)) layers
       pure (args', bodyCore)
       where
-        foldLayer (v, m, vTy, lts, tySpan) act = do
-          mkClosureCheck s body m lts do
-            addVar v.var v.span vTy
-            act
+        foldLayer (v, m, vTy, lts, tySpan) act =
+          mkClosureCheck s body m lts [(v.var, v.span, vTy)] $ act
         extractTyLayers :: Int -> Ty -> (Ty, [(Mult, Ty, Ty, Span)])
         extractTyLayers i ty@Ty{span, tyf}
           | i > 0 = case tyf of
@@ -475,13 +489,14 @@ synthAppTy t1 tys s = do
         decrementLts lts
         pure (k, body)
       RefTy l (Ty _ (Univ Many lts v k body)) -> do
-        useRef baseTy
+        decrementLts l
         pure (k, body)
       _ -> throwError $ TyIsNotUniv baseTy s
     k' <- kindOf tyArg
     unless (k == k') $ throwError $ ExpectedKind k k' $ getSpan tyArg
-    incRef body
-    pure $ typeAppSub tyArg body
+    let result = typeAppSub tyArg body
+    incRef result
+    pure result
 
 synth :: Tm -> Tc Core
 synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
@@ -501,7 +516,7 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
     vTy <- lookupVar v s
     case vTy.tyf of
       RefTy (Ty _ (LtOf v')) _ -> do
-        alterBorrowCount v' (+1)
+        alterBorrowCount 1 v'
         pure $ Core vTy s $ CopyCF v
       RefTy _ _ -> pure $ Core vTy s $ CopyCF v
       _ -> throwError $ CannotCopyNonRef vTy s
@@ -531,7 +546,7 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
         checkBorrowList lts s
         t2Core <- check aTy t2
         useRef aTy
-        useRef t1Ty
+        decrementLts lt
         incRef bTy
         pure $ Core bTy s $ extendAppTm t1Core t2Core
       _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1

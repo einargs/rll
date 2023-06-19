@@ -40,6 +40,29 @@ Thoughts
   structures probably, and this is the specialization stage.
 - [X] Fix the broken tests for type checking after syntax changed.
 - [X] Make the changes to the commented out test.
+- [ ] Why shouldn't we call `incRef` on the type of a variable we add with `addVar`?
+  - No, I think we should be. I think rather than compensating for moves that's how we
+    deal with the problem.
+- [ ] Make `alterBorrowCount` take a span and throw an error if it can't find that variable.
+- [ ] Write a test to see what happens when I pass a struct with multiple references to a variable
+  or multiple arguments that have a reference to a variable.
+  - I'm worried that instead of adding up mentions in moved and structs I should just be
+    doing a straight union? In moved I should add. I think because `ltsInTy` runs on the structs
+    it's all fine.
+- [ ] Write some tests to figure out how we should be tracking borrow counts for type variables.
+  Because I have a sudden realization that I could write some bad code by using type variables.
+  - Maybe? I mean, while a type variable lifetime exists we know it isn't deallocated, so isn't
+    anything fine? And anything persisting has to be accounted for?
+  - I'll have to actually reason this out.
+- [ ] Could I rewrite `checkStableBorrowCounts` to instead use something like `ClosureEnv` as a
+  basis? That would save me from having to account for `Moved` stuff, though I'd have to take into
+  account `drop`s. No, I think it's better to check the raw borrow counts; less room for bugs.
+  - Or is there? Because as I've just seen borrow counts being stable doesn't really make sense
+    when there's moves happening. Maybe it's better to only check that the borrow counts of things
+    referenced are stable.
+  - [ ] Write a bunch of tests to make sure that unstable borrow count errors happen properly and
+    then test this approach.
+- [ ] Make QuoteTxt remove excess indentation. And probably discard an empty first line? No.
 - [ ] Write the tests that I have as TODO and the relevant ones in the future tests section.
 - [ ] When synthesizing function types I need to make sure that I don't automatically make
   all Univ `Many`, because then a single-use context can be duplicated.
@@ -128,6 +151,9 @@ Future tests.
 - [ ] I need a bunch of tests for multiples of stuff. I've found parse order errors,
   as well as several errors in stuff like pulling apart function and univ types giving
   the args in the wrong order.
+- [ ] I had `ltsInTy` including the input and output of functions which could have been a problem.
+  - It was only used for figuring out the lifetimes of consumed things in `ltsInConsumed`.
+- [ ] More tests involving returning structs.
 - [ ] Tests to make sure not fully applying types to a polymorphic function is caught
   in type checking.
   - Note that there's still a thing where they can end up used as values
@@ -191,6 +217,24 @@ These are eventual things to do for polishing.
   `sanityCheckType` for it.
   - I don't think I want to do this.
 - [ ] Allow mutually recursive functions and using a function before it's defined.
+- [X] Figure out a way to automatically detect that we can use moving a reference into a closure to
+  resolve what would be an imbalance instead of borrowing or copying. Below, there's an error because
+  it assumes that we're just dropping c1 without figuring out that we want to move c1 into that closure.
+  - This may actually be a fair assumption; we'll see how much of a problem this is with real code.
+  ```
+  test : Unit
+  = let u1 = Unit in let u2 = Unit in
+  let other = ((\u ->
+    let c1 = &u1 in \y ->
+      let Unit = u in
+      let c2 = &u2 in
+      drop c1 in drop c2 in y)
+      : forall M ['u1, 'u2] t : Type.
+        Unit -M['u1, 'u2]>
+        t -S['u1, 'u2]> t) in
+  let Int = other [Int] Unit Int in
+  let Unit = u1 in let Unit = u2 in Unit;
+  ```
 
 ## Better Errors
 - [X] Improve the context join error to highlight the areas that conflict and label them directly
@@ -232,3 +276,5 @@ Thoughts about various future features.
 - I can mimic cut in stuff by just using try on say the first part of a parser.
   See the funDecl parser.
 - I finally worked out the difference between system f and f omega -- applying types at the type level.
+- I'm going to just say that we should never have a subzero borrow count. Optimizations like
+  that kind of "eventual consistency" open up way too many headaches.
