@@ -24,7 +24,7 @@ createVarRef v s = do
   case t.tyf of
     RefTy _ _ -> throwError $ CannotRefOfRef t s
     _ -> pure ()
-  alterBorrowCount 1 v
+  alterBorrowCount 1 v s
   -- NOTE I'm pretty sure using this span makes sense, but check.
   pure $ Ty s $ RefTy (Ty s $ LtOf v) t
 
@@ -38,7 +38,7 @@ useVar v s = do
   ctx <- get
   case M.lookup v ctx.termVars of
     Just (borrowCount, ty) -> do
-      when (borrowCount < 0) $ throwError $ CompilerLogicError "subzero borrow count" (Just s)
+      when (borrowCount < 0) $ error "Subzero borrow count. Should be caught in alterBorrowCount"
       unless (borrowCount == 0) $ do
         borrowers <- variablesBorrowing v
         throwError $ CannotUseBorrowedVar v borrowers s
@@ -112,7 +112,7 @@ addPartialBorrowVar v s lt bTy = do
   let ty = toRef s lt bTy
   addVar v s ty
   case ty.tyf of
-    RefTy (Ty _ (LtOf v')) _ -> alterBorrowCount 1 v'
+    RefTy (Ty vs (LtOf v')) _ -> alterBorrowCount 1 v' vs
     RefTy (Ty _ (TyVar _)) _ -> pure ()
     RefTy lt@(Ty _ (LtJoin _)) _ -> throwError $ RefLtIsComposite lt s
     RefTy lt _ -> throwError $ ExpectedKind LtKind TyKind $ getSpan lt
@@ -515,8 +515,8 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
   Copy v -> do
     vTy <- lookupVar v s
     case vTy.tyf of
-      RefTy (Ty _ (LtOf v')) _ -> do
-        alterBorrowCount 1 v'
+      RefTy (Ty vs (LtOf v')) _ -> do
+        alterBorrowCount 1 v' vs
         pure $ Core vTy s $ CopyCF v
       RefTy _ _ -> pure $ Core vTy s $ CopyCF v
       _ -> throwError $ CannotCopyNonRef vTy s

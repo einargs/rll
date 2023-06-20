@@ -205,18 +205,17 @@ addModuleFun s name ty = do
     Nothing -> pure ()
   put $ ctx {moduleFuns=M.insert name ty ctx.moduleFuns}
 
-alterBorrowCount :: Int -> Var -> Tc ()
-alterBorrowCount i v = do
+alterBorrowCount :: Int -> Var -> Span -> Tc ()
+alterBorrowCount i v s = do
   -- TODO
-  (sc,_) <- lookupEntry v undefined
+  (sc,_) <- lookupEntry v s
   D.traceM $ "altering " <> show v <> " by " <> show i <> " from " <> show sc
   modify' $ onTermVars $ M.adjust (first (+i)) v
   when (sc + i < 0) $ do
     let ts :: Show a => a -> Text
         ts = T.pack . show
-        msg = "subzero borrow count " <> show (sc+i) <> " for " <> show v
-    D.traceM msg
-    -- throwError $ CompilerLogicError msg Nothing
+        msg = "subzero borrow count " <> ts (sc+i) <> " for " <> ts v
+    throwError $ CompilerLogicError msg (Just s)
   -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
 addVar :: Var -> Span -> Ty -> Tc ()
@@ -270,14 +269,26 @@ withKind k = withKinds [k]
 lifetimeVars :: Ty -> Tc [Var]
 lifetimeVars = fmap ltSetToVars . lifetimeSet
 
+-- | Get a list of explicitly mentioned variables and their spans
+-- in the lifetime.
+--
+-- Ignores lifetime variables.
+lifetimeSVars :: Ty -> Tc [(Var, Span)]
+lifetimeSVars = fmap ltSetToSVars . lifetimeSet
+
 -- | A lifetime type reduced down to its essence.
 type LtSet = S.HashSet (Span, Either TyVar Var)
 
+-- | Convenience function for getting a list of variables and their locations
+-- in the type from a lifetime set.
+ltSetToSVars :: LtSet -> [(Var, Span)]
+ltSetToSVars = mapMaybe f . S.toList where
+  f (s, Right v) = Just (v, s)
+  f _ = Nothing
+
 -- | Convenience function for getting a list of variables from a lifetime set
 ltSetToVars :: LtSet -> [Var]
-ltSetToVars = mapMaybe f . fmap snd . S.toList where
-  f (Right v) = Just v
-  f _ = Nothing
+ltSetToVars = fmap fst . ltSetToSVars
 
 -- | Convert a lifetime set to a list of the lifetimes.
 ltSetToTypes :: LtSet -> [Ty]
@@ -355,11 +366,11 @@ ltsForClosure c1 c2 tm = S.union (ltsInConsumed c1 c2) $ ltsBorrowedIn c1 tm
 adjustRef :: Int -> Ty -> Tc ()
 adjustRef i ty = do
   ctx <- get
-  forM_ (ltSetToVars $ ltsInTy ctx ty) $ alterBorrowCount i
+  forM_ (ltSetToSVars $ ltsInTy ctx ty) $ uncurry $ alterBorrowCount i
 
 -- | Modify the borrow count for the variables in the mentioned lifetime variables.
 adjustLts :: Int -> Ty -> Tc ()
-adjustLts i lty = lifetimeVars lty >>= mapM_ (alterBorrowCount i)
+adjustLts i lty = lifetimeSVars lty >>= mapM_ (uncurry $ alterBorrowCount i)
 
 decrementLts :: Ty -> Tc ()
 decrementLts = adjustLts (-1)
