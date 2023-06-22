@@ -10,7 +10,7 @@ import Rll.AstUtil
 import Rll.TcSpecUtil
 
 spec :: Spec
-spec = do
+spec = parallel do
   describe "type checking" do
     it "Standard context parses" do
       rawTest stdFile
