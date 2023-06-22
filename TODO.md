@@ -60,7 +60,6 @@ Thoughts
   - Or is there? Because as I've just seen borrow counts being stable doesn't really make sense
     when there's moves happening. Maybe it's better to only check that the borrow counts of things
     referenced are stable.
-- [ ] Write the tests that I have as TODO and the relevant ones in the future tests section.
 - [ ] When synthesizing function types I need to make sure that I don't automatically make
   all Univ `Many`, because then a single-use context can be duplicated.
 - [ ] Add tests for closure environments in `Core`.
@@ -139,6 +138,9 @@ When we implement traits, I think that `Spec` will be where we elaborate all of 
 # Future Tests
 Future tests.
 
+- [ ] Write some tests for the functionality of `toRef` -- i.e. pattern matching on a reference
+  to a datatype and getting the original type for members that are already references. I want to
+  make sure the borrow count stuff works right.
 - [ ] Write a bunch of tests to make sure that unstable borrow count errors happen properly.
 - [ ] A bunch of tests for substitution.
   - [ ] Given `\x.\y. Pair Int x` (in univ) and we sub for `x` it works right?
@@ -172,7 +174,49 @@ Future tests.
 
 # Eventual Polish
 These are eventual things to do for polishing.
+- [ ] For the `varLocs` thing used to help point to where a variable was dropped, I need to
+  locally scope it. Otherwise it can point to a variable being used after it was dropped
+  even if that was never in scope. Below it will say that `r3` was already dropped inside
+  `f` when we accidentally use `r3` instead of `u3` as a typo at the end of the test.
+  ```
+  struct Holder (a : Lifetime) { (&a Unit) (&a Unit) Unit }
+
+  test : Unit
+  = let u1 = Unit in
+  let f = \[l:Lifetime](h:&l (Holder 'u1)) ->
+    let Holder r1 r2 r3 = h in
+    let r2c = (r2 : &'u1 Unit) in
+    let r3c = r3 : &l Unit in
+    drop r1 in drop r2c in drop r3c in
+    Unit
+  in
+  let h = Holder ['u1] &u1 &u1 Unit in
+  let Unit = f ['h] &h in
+  let Holder r1 r2 u3 = h in
+  drop r1 in drop r2 in drop r3 in
+  let Unit = u3 in u1;
+  ```
+- [X] Improve the parse error message for the below. The last type for `r` is omitted, but it just
+  messes up. Maybe I should label the `ty` and `tm` constructors as type and term instead of just
+  the branches?
+  ```
+  let f = \(r:&'u1) (h:Holder 'u1) ->
+  ```
 - [ ] Make QuoteTxt remove excess indentation. And probably discard an empty first line? No.
+- [ ] Figure out a way to improve the error messages for when a function is referencing an argument
+  being passed to it. Right now the error is caught because we decrement `f`'s `lts` after we
+  check the argument (`u1`), but the `deleteVar` that removes `f` happens once we `synth` `f`.
+  ```
+  struct Holder (a : Lifetime) { &a Unit }
+  test : Unit
+  = let u1 = Unit in
+  let f = \(u:Unit) -> let ur = &u1 in
+    drop ur in u in
+  let Unit = f u1 in
+  Unit;
+  ```
+- [ ] Look into making `addVar` always call `incRef` on the type. Right now the problem is
+  `letClause`.
 - [X] Label all the parser nodes for better error messages.
 - [X] I'm going to need like a `SpanVar` type for e.g. function arguments where I want to be able
   to point at it.

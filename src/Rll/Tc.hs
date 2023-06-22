@@ -209,7 +209,7 @@ alterBorrowCount :: Int -> Var -> Span -> Tc ()
 alterBorrowCount i v s = do
   -- TODO
   (sc,_) <- lookupEntry v s
-  D.traceM $ "altering " <> show v <> " by " <> show i <> " from " <> show sc
+  -- D.traceM $ "altering " <> show v <> " by " <> show i <> " from " <> show sc
   modify' $ onTermVars $ M.adjust (first (+i)) v
   when (sc + i < 0) $ do
     let ts :: Show a => a -> Text
@@ -389,20 +389,23 @@ isTyBorrowing v1 Ty{tyf} = case tyf of
 variablesBorrowing :: Var -> Tc [Var]
 variablesBorrowing v = do
   tv <- gets (.termVars)
-  let f (_, (bc, ty)) = isTyBorrowing v ty
-      vars = fmap fst $ filter f $ M.toList tv
+  let f (v', (bc, ty))
+        | isTyBorrowing v ty = Just v'
+        | otherwise = Nothing
+      vars = mapMaybe f $ M.toList tv
   pure $ vars
 
 -- | Drop the variable.
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
+  {-
   D.traceM $ "Dropping " <> show v <> " borrow count " <> show borrowCount <> " ty " <> show ty
   case ty.tyf of
     RefTy (Ty _ (LtOf p)) _ -> do
       (parentCount, _) <- lookupEntry p s
       D.traceM $ "Parent " <> show p <> " borrow count " <> show parentCount
-    _ -> pure ()
+    _ -> pure () -}
   unless (borrowCount == 0) $ do
     borrowers <- variablesBorrowing v
     throwError $ CannotDropBorrowedVar v borrowers s
@@ -411,11 +414,13 @@ dropVar v s = do
     Univ Many l _ _ _ -> decrementLts l
     FunTy Many _ l _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
+  {-
   case ty.tyf of
     RefTy (Ty _ (LtOf p)) _ -> do
       (parentCount, _) <- lookupEntry p s
       D.traceM $ "END: parent " <> show p <> " borrow count " <> show parentCount
     _ -> pure ()
+  -}
   deleteVar v s
 
 -- | Utility function for decrementing the borrow count of the referenced variable

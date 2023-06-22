@@ -259,10 +259,16 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       , simpleBlock dropped "Removed here"
       ] Nothing
 
-    CannotUseBorrowedVar v borrowers s -> block s
-      (Just $ "Cannot use variable " <> v.name <> " while it is borrowed")
-      (defaultSpanToPtrs s)
-      (Just $ "Borrowed by: " <> varList borrowers)
+    CannotUseBorrowedVar v borrowers s ->
+      let msg = if borrowers == []
+            then "Most likely the variable is borrowed by a closure it is an argument to. "
+                 <> "Current limitations mean error messages for that are weak."
+                 <> "See #Eventual Polish in TODO.md for more information."
+            else "Borrowed by: " <> varList borrowers
+      in block s
+        (Just $ "Cannot use variable " <> v.name <> " while it is borrowed")
+        (defaultSpanToPtrs s)
+        (Just msg)
 
     IncorrectBorrowedVars borrowedTy inferredLts s ->
       let tySpan = getSpan borrowedTy
@@ -369,7 +375,7 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       let blocks = case mbSpan of
             Just s -> [defBlock s Nothing (defaultSpanToPtrs s) Nothing]
             Nothing -> []
-      in E.Errata (Just msg) blocks Nothing
+      in E.Errata (Just $ "Compiler Logic Error: " <> msg) blocks Nothing
 
     -- TODO: fix up this message
     BadLetStructVars vars tys -> spanMsg (getSpan $ head vars) $ ptext $

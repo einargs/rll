@@ -111,12 +111,7 @@ addPartialBorrowVar :: Var -> Span -> Ty -> Ty -> Tc ()
 addPartialBorrowVar v s lt bTy = do
   let ty = toRef s lt bTy
   addVar v s ty
-  case ty.tyf of
-    RefTy (Ty vs (LtOf v')) _ -> alterBorrowCount 1 v' vs
-    RefTy (Ty _ (TyVar _)) _ -> pure ()
-    RefTy lt@(Ty _ (LtJoin _)) _ -> throwError $ RefLtIsComposite lt s
-    RefTy lt _ -> throwError $ ExpectedKind LtKind TyKind $ getSpan lt
-    _ -> error "toRef should ensure type is always a RefTy"
+  incRef ty
 
 -- | Pull apart a fully applied type constructor.
 --
@@ -138,15 +133,18 @@ getTyConArgs mkErr ty = do
 caseClause :: Span -> Tm -> [CaseBranch Tm] -> TcMethod -> Tc Core
 caseClause caseSpan t1 branches tcMethod = do
   t1Core@Core{ty=t1Ty} <- synth t1
+  useRef t1Ty
   cores <- case t1Ty.tyf of
     RefTy lt enumTy -> do
-      decrementLts lt
+      --decrementLts lt
       (tyName,conMap) <- ensureEnum enumTy
       let f sv ty = addPartialBorrowVar sv.var sv.span lt ty
       joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
     _ -> do
       (tyName,conMap) <- ensureEnum t1Ty
-      let f sv ty = addVar sv.var sv.span ty
+      let f sv ty = do
+            addVar sv.var sv.span ty
+            incRef ty
       joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
   unless (length cores == length branches) $ throwError $
     CompilerLogicError ("cores length " <> T.pack (show (length cores)) <>
@@ -210,13 +208,16 @@ getStructMembers ty termSpan = do
 letStructClause :: Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letStructClause letSpan structCon memberVars t1 body method = do
   t1Core@Core{ty=t1Ty} <- synth t1
+  useRef t1Ty
   bodyCore <- case t1Ty.tyf of
     RefTy lt structTy -> do
-      decrementLts lt
+      --decrementLts lt
       let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
       handle f structTy
     _ -> do
-      let f svar ty = addVar svar.var svar.span ty
+      let f svar ty = do
+            addVar svar.var svar.span ty
+            incRef ty
       handle f t1Ty
   pure $ Core bodyCore.ty letSpan $ LetStructCF structCon memberVars t1Core bodyCore
   where
@@ -233,7 +234,6 @@ letStructClause letSpan structCon memberVars t1 body method = do
 
 letClause :: Span -> SVar -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letClause s x t1 t2 f = do
-  D.traceM $ "entered let " <> show x
   t1Core <- synth t1
   addVar x.var s t1Core.ty
   t2Core <- f t2
@@ -258,8 +258,8 @@ verifyMult _ _ _ _ = pure ()
 --
 -- Any borrowing of a variable in startCtx needs to have same borrow count at the end.
 checkStableBorrowCounts :: Span -> [(Var,Span,Ty)] -> Ctx -> Ctx -> Tc ()
-checkStableBorrowCounts s addedVars c1 c2 = D.trace ("unstableVars " <> show unstableBorrowedVars) $
-  unless ([] == M.keys unstableBorrowedVars) $ err
+checkStableBorrowCounts s addedVars c1 c2 =
+  unless ([] == unstableBorrowedVars) $ err
   where
   argTys = (\(_,_,ty) -> ty) <$> addedVars
   movedVarTys = M.elems $ M.map snd $ M.difference c1.termVars c2.termVars
@@ -273,9 +273,9 @@ checkStableBorrowCounts s addedVars c1 c2 = D.trace ("unstableVars " <> show uns
     f k (count,ty) = case M.lookup k addedVarCounts of
       Just c' -> (count - c', ty)
       Nothing -> (count, ty)
-  err = throwError $ UnstableBorrowCounts (M.keys unstableBorrowedVars) s
+  err = throwError $ UnstableBorrowCounts unstableBorrowedVars s
   -- unstableBorrowedVars :: [Var]
-  unstableBorrowedVars = m where
+  unstableBorrowedVars = M.keys m where
     m = M.mapMaybe id $ M.intersectionWith f c1MinusAdded c2.termVars
     f (i1, _) (i2, _) | i1 /= i2 = Just (i1, i2)
                       | otherwise = Nothing
@@ -285,13 +285,11 @@ checkStableBorrowCounts s addedVars c1 c2 = D.trace ("unstableVars " <> show uns
 mkClosureSynth :: Span -> Tm -> [(Var, Span, Ty)] -> Tc a -> Tc (Ty, Mult, a)
 mkClosureSynth s body addVars act = do
   startCtx <- get
-  D.traceM $ "start context " <> show startCtx.termVars
   forM_ addVars \(v,s,ty) -> do
     addVar v s ty
     incRef ty
   out <- act
   endCtx <- get
-  D.traceM $ "end context " <> show endCtx.termVars
   let lts = Ty s $ LtJoin $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s addVars startCtx endCtx
@@ -375,13 +373,11 @@ verifyBorrows s startCtx endCtx lts body = do
 mkClosureCheck :: Span -> Tm -> Mult -> Ty -> [(Var, Span, Ty)] -> Tc a -> Tc a
 mkClosureCheck s body mult lts addVars m = do
   startCtx <- get
-  D.traceM $ "start context " <> show startCtx.termVars
   forM_ addVars \(v,s,ty) -> do
     addVar v s ty
     incRef ty
   val <- m
   endCtx <- get
-  D.traceM $ "end context " <> show endCtx.termVars
 
   -- Check specified lifetimes
   verifyBorrows s startCtx endCtx lts body

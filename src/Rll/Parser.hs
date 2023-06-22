@@ -151,7 +151,7 @@ mkParens :: Parser a -> Parser a
 mkParens = between (keyword "(") (keyword ")")
 
 kindp :: Parser Kind
-kindp = do
+kindp = label "kind" do
   k1 <- subKind
   tyOpContinue k1 <|> pure k1
   where
@@ -171,7 +171,7 @@ branch :: Show a => String -> Parser a -> Parser a
 branch name = try . label name
 
 ty :: Parser Ty
-ty = do
+ty = label "type" do
   t1 <- subTy
   funTy t1 <|> pure t1
   where
@@ -247,7 +247,7 @@ simpleTy = choice [univTy, tyVar, tyCon, ltOf, ltJoin, refTy, parenTy] where
       pure $ wrap s1 outTy $ Univ m lts (TyVarBinding tyVarName) k outTy
 
 tm :: Parser Tm
-tm = fullTm
+tm = label "term" fullTm
   where
     fullTm = do
       t1 <- subTm

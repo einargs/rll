@@ -757,12 +757,224 @@ spec = do
         Unit;
         |]
 
-    -- TODO: make sure passing a unit to a closure that has captured a reference to it
-    -- doesn't work.
-    -- it "can move a structure containing a lifetime into a closure" do
+    it "prevents passing a borrow unit to a closure that references it" do
+      -- Current limitations mean that we can't accurately diagnose that `f`
+      -- is borrowing `u1`. We decrement the `lts` after checking `u1`,
+      -- but the variable deletion happens earlier. See Eventual Polish
+      -- in `TODO.md` for more information.
+      baseFailTest (CannotUseBorrowedVar (Var "u1") [] es) [txt|
+        test : Unit
+        = let u1 = Unit in
+        let f = \(u:Unit) -> let ur = &u1 in
+          drop ur in u in
+        let Unit = f u1 in
+        Unit;
+        |]
 
-    -- TODO: doesn't allow multi-use univ around single use functions that can
-    -- duplicate them when it shouldn't
+      baseFailTest (CannotUseBorrowedVar (Var "u1") [] es) [txt|
+        struct Holder (a : Lifetime) { (&a Unit) }
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \[l:Lifetime] (h:Holder l) (u:Unit) ->
+          let Holder ur = h in
+          drop ur in u
+        in
+        let Unit = f ['u1] (Holder ['u1] &u1) u1 in
+        Unit;
+        |]
+
+      baseTest [txt|
+        struct Holder (a : Lifetime) { (&a Unit) }
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \[l:Lifetime] (h:Holder l) ->
+          let Holder ur = h in
+          drop ur in \(u:Unit) -> u
+        in
+        let Unit = f ['u1] (Holder ['u1] &u1) u1 in
+        Unit;
+        |]
+
+    it "can handle structures with multiple duplicate references" do
+      baseTest [txt|
+        struct Holder (a : Lifetime) { (&a Unit) (&a Unit) }
+        test : Unit
+        = let u1 = Unit in
+        let f = \(h:Holder 'u1) ->
+          let Holder r1 r2 = h in
+          drop r1 in drop r2 in
+          Unit
+        in
+        let Unit = f (Holder ['u1] &u1 &u1) in
+        u1;
+        |]
+
+      baseTest [txt|
+        struct Holder (a : Lifetime) { (&a Unit) (&a Unit) Unit }
+        test : Unit
+        = let u1 = Unit in
+        let f = \[l:Lifetime](h:&l (Holder 'u1)) ->
+          let Holder r1 r2 r3 = h in
+          let r2c = (r2 : &'u1 Unit) in
+          let r3c = r3 : &l Unit in
+          drop r1 in drop r2c in drop r3c in
+          Unit
+        in
+        let h = Holder ['u1] &u1 &u1 Unit in
+        let Unit = f ['h] &h in
+        let Holder r1 r2 u3 = h in
+        drop r1 in drop r2 in drop u3 in
+        let Unit = u3 in u1;
+        |]
+
+      baseTest [txt|
+        struct Holder (a : Lifetime) { (&a Unit) }
+        test : Unit
+        = let u1 = Unit in
+        let f = \(h:Holder 'u1) ->
+          let Holder r1 = h in
+          drop r1 in
+          Unit
+        in
+        let Unit = f (Holder ['u1] &u1) in
+        u1;
+        |]
+
+      baseTest [txt|
+        struct Holder (a : Lifetime) { (&a Unit) (&a Unit) }
+        test : Unit
+        = let u1 = Unit in
+        let Unit = (
+          let h = Holder ['u1] &u1 &u1 in
+          let Holder r1 r2 = h in
+          drop r1 in drop r2 in Unit)
+        in u1;
+        |]
+
+    it "can handle enums with duplicate references" do
+      baseTest [txt|
+        enum Dub (a : Lifetime)
+          = Two (&a Unit) (&a Unit)
+          | None;
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \(d:Dub 'u1) ->
+          case d of
+          | Two r1 r2 ->
+            drop r1 in drop r2 in Unit
+          | None -> Unit
+        in
+        let Unit = f (Two ['u1] &u1 &u1) in
+        u1;
+        |]
+      baseTest [txt|
+        enum Dub (a : Lifetime)
+          = Two (&a Unit) (&a Unit) Unit
+          | None;
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \[l:Lifetime] (d:&l (Dub 'u1)) ->
+          case d of
+          | Two r1 r2 r3 ->
+            let r2c = (r2 : &'u1 Unit) in
+            let r3c = (r3 : &l Unit) in
+            drop r1 in drop r2c in drop r3c in Unit
+          | None -> Unit
+        in
+        let e = Two ['u1] &u1 &u1 Unit in
+        let Unit = f ['e] &e in
+        case e of
+        | Two r1 r2 u3 ->
+          drop r1 in drop r2 in
+          let Unit = u3 in u1
+        | None -> u1;
+        |]
+      baseTest [txt|
+        enum Dub (a : Lifetime)
+          = Two (&a Unit)
+          | None;
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \(d:Dub 'u1) ->
+          case d of
+          | Two r1 ->
+            drop r1 in Unit
+          | None -> Unit
+        in
+        let Unit = f (Two ['u1] &u1) in
+        u1;
+        |]
+      baseTest [txt|
+        enum Dub (a : Lifetime)
+          = Two (&a Unit) (&a Unit)
+          | None;
+
+        test : Unit
+        = let u1 = Unit in
+        let d = Two ['u1] &u1 &u1 in
+        let Unit = (
+          case d of
+          | Two r1 r2 ->
+            drop r1 in drop r2 in Unit
+          | None -> Unit)
+        in u1;
+        |]
+
+    it "can account for multiple arguments referencing the same variable" do
+      baseTest [txt|
+        struct Holder (a : Lifetime) { &a Unit }
+
+        test : Unit
+        = let u1 = Unit in
+        let f = \(r:&'u1) (h:Holder 'u1) ->
+          drop r in let Holder r = h in
+          drop r in Unit
+        in
+        let Unit = f &u1 (Holder ['u1] &u1) in
+        u1;
+        |]
+
+    it "can move a structure containing a lifetime into a closure" do
+      baseTest [txt|
+        struct Holder (a : Lifetime) { &a Unit }
+        test : Unit
+        = let u1 = Unit in
+        let h = Holder ['u1] &u1 in
+        let other = (\u -> let hr = &h in
+          \y ->
+            let Unit = u in
+            let Holder ur = hr in
+            drop ur in y)
+          : forall M ['h] t : Type.
+            Unit -M['h]> t -S['h]> t in
+        let Int = other [Int] Unit Int in
+        let Holder ur = h in
+        drop ur in
+        u1;
+        |]
+
+    it "does not always synthesize Univ as Many" do
+      baseFailTest (RemovedTermVar (Var "other") es es) [txt|
+        struct Holder (a : Lifetime) { &a Unit }
+
+        test : Unit
+        = let u1 = Unit in
+        let h = Holder ['u1] &u1 in
+        let other = (\[t:Type] (u:Unit) -> let hm = h in
+          \(y:t) ->
+            let Unit = u in
+            let Holder ur = hm in
+            drop ur in y)
+            in
+        let Int = other [Int] Unit Int in
+        let Str = other [Str] Unit Str in
+        u1;
+        |]
 
     it "can pass references as type arguments" do
       baseTest [txt|
