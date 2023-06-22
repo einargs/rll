@@ -248,6 +248,12 @@ prettyPrintError source err = LT.toStrict $ E.prettyErrors source [errMsg] where
       (spanToPtrs True Nothing S.fancyRedPointer s)
       Nothing
 
+    CannotDropTy ty s ->
+      E.Errata (Just $ ptext $ "Cannot drop type" <+> P.pretty ty)
+      [ simpleBlock (getSpan ty) "Type from here"
+      , simpleBlock s "Dropped here"
+      ] Nothing
+
     UnknownTermVar v s -> block s
       (Just $ "Unknown variable " <> v.name)
       (spanToPtrs True Nothing S.fancyRedPointer s)

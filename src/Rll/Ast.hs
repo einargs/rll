@@ -1,5 +1,11 @@
 {-# LANGUAGE OverloadedRecordDot, DuplicateRecordFields, PatternSynonyms, BangPatterns #-}
-module Rll.Ast where
+module Rll.Ast
+  ( Span(..), Spans(..)
+  , Var(..), TyVar(..), SVar(..), TyVarBinding(..)
+  , EnumCon(..), TypeParam(..), Decl(..)
+  , Kind(..), Mult(..), Ty(..), TyF(..)
+  , Tm(..), TmF(..), CaseBranch(..), Literal(..)
+  ) where
 
 import Data.Text (Text)
 import qualified Data.Text as T

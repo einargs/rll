@@ -825,7 +825,7 @@ spec = do
         let h = Holder ['u1] &u1 &u1 Unit in
         let Unit = f ['h] &h in
         let Holder r1 r2 u3 = h in
-        drop r1 in drop r2 in drop u3 in
+        drop r1 in drop r2 in
         let Unit = u3 in u1;
         |]
 
@@ -931,7 +931,7 @@ spec = do
 
         test : Unit
         = let u1 = Unit in
-        let f = \(r:&'u1) (h:Holder 'u1) ->
+        let f = \(r:&'u1 Unit) (h:Holder 'u1) ->
           drop r in let Holder r = h in
           drop r in Unit
         in
@@ -1232,29 +1232,25 @@ spec = do
         s2 : String = "Everyone";
         |]
 
-    {- 
-    fit "Quick test" do
-      baseTest [txt|
+    it "correctly scopes information about when variables were dropped" do
+      -- We're checking to make sure it throws UnknownTermVar rather than
+      -- RemovedTermVar. This means that information about when a variable
+      -- is dropped (in `varLocs`) does not persist past when it is relevant.
+      baseFailTest (UnknownTermVar (Var "r3") es) [txt|
+        struct Holder (a : Lifetime) { (&a Unit) (&a Unit) Unit }
+
         test : Unit
-        = let u = Unit in
-        let f = \ x: Unit ->
-          let r = &u in
-          drop r in
-          x in
-        let Unit = f Unit in
-        u;
+        = let u1 = Unit in
+        let f = \[l:Lifetime](h:&l (Holder 'u1)) ->
+          let Holder r1 r2 r3 = h in
+          let r2c = (r2 : &'u1 Unit) in
+          let r3c = r3 : &l Unit in
+          drop r1 in drop r2c in drop r3c in
+          Unit
+        in
+        let h = Holder ['u1] &u1 &u1 Unit in
+        let Unit = f ['h] &h in
+        let Holder r1 r2 u3 = h in
+        drop r1 in drop r2 in drop r3 in
+        let Unit = u3 in u1;
         |]
--}
-
-
-
-
-
-
-
-
-
-    -- it "" do
-    --   baseTest [txt|
-    --     test : Unit = Unit
-    --     |]

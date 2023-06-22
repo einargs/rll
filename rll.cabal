@@ -29,12 +29,15 @@ library
       Rll.Ast
       Rll.Context
       Rll.Core
+      Rll.LtSet
       Rll.Parser
       Rll.Spec
       Rll.SpecIR
-      Rll.Tc
+      Rll.TcMonad
+      Rll.TcTools
       Rll.TypeCheck
       Rll.TypeError
+      Rll.TypeSub
   other-modules:
       Paths_rll
   hs-source-dirs:

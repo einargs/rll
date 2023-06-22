@@ -22,7 +22,7 @@ import Rll.TypeCheck
 import Rll.Ast
 import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
-import Rll.Tc
+import Rll.TcMonad
 import Rll.Core
 
 processFile :: String -> T.Text

@@ -1,84 +1,34 @@
-module Rll.Tc
-  ( Tc(..), runTc, evalTc
-  , expectedTermVar, lookupEntry, lookupVar, lookupKind
-  , lookupDataType, lookupDataCon, addDataType, addModuleFun
+-- | Tools for type checking.
+--
+-- Basically, as much type checking stuff that can be moved into
+-- here without needing to import `Core.hs`.
+module Rll.TcTools
+  ( addDataType, addModuleFun
   , alterBorrowCount, addVar, deleteVar, withKind
+  , endVarScopes
   , kindOf, sanityCheckType
-  , rawTypeSub, typeSub, typeAppSub
-  , lifetimeVars, lifetimeSet
-  , ltSetToTypes, ltsForClosure, ltSetToVars, ltsInTy
+  , verifyCtxSubset
   , incrementLts, decrementLts, variablesBorrowing
   , dropVar, useRef, incRef
   , rawIndexTyVars, indexTyVars, indexTyVarsInTm
-  , applyTypeParams
   ) where
 
 import Rll.Ast
 import Rll.Context
 import Rll.TypeError
+import Rll.TcMonad
+import Rll.LtSet
+import Rll.TypeSub
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
 import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
-import qualified Data.HashSet as S
-import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
-import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Control.Arrow (first, second)
 import Data.List (foldl')
-import Safe (atMay)
 import Data.Maybe (mapMaybe)
 import Control.Exception (assert)
 import Debug.Trace qualified as D
-
-newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
-  deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
-
-runTc :: Ctx -> Tc a -> Either TyErr (a, Ctx)
-runTc ctx = runExcept . flip runStateT ctx . unTc
-
-evalTc :: Ctx -> Tc a -> Either TyErr a
-evalTc ctx = fmap fst . runTc ctx
-
--- | Throws either `UnknownTermVar` or `RemovedTermVar`.
-expectedTermVar :: Var -> Span -> Tc a
-expectedTermVar v s = do
-  vl <- gets (.varLocs)
-  throwError $ case M.lookup v vl of
-    Just (_,Nothing) -> CompilerLogicError "varLocs not in synch with termVars" (Just s)
-    Just (_,Just removedSpan) -> RemovedTermVar v s removedSpan
-    Nothing -> UnknownTermVar v s
-
-lookupEntry :: Var -> Span -> Tc (Int, Ty)
-lookupEntry v s = do
-  tm <- gets (.termVars)
-  case M.lookup v tm of
-    Nothing -> expectedTermVar v s
-    Just e -> pure e
-
-lookupVar :: Var -> Span -> Tc Ty
-lookupVar v s = snd <$> lookupEntry v s
-
-lookupKind :: TyVar -> Span -> Tc Kind
-lookupKind v@(MkTyVar name i) s = do
-  l <- gets (.localTypeVars)
-  case atMay l i of
-    Just k -> pure k
-    Nothing -> throwError $ UnknownTypeVar v s
-
-lookupDataType :: Var -> Span -> Tc DataType
-lookupDataType v s = do
-  dtm <- gets (.dataTypes)
-  case M.lookup v dtm of
-    Nothing -> throwError $ UnknownDataType v s
-    Just dt -> pure dt
-
-lookupDataCon :: Var -> Span -> Tc (DataType, Ty)
-lookupDataCon v s = do
-  m <- gets (.moduleDataCons)
-  case M.lookup v m of
-    Nothing -> throwError $ UnknownDataCon v s
-    Just (dt, ty) -> pure (dt, ty)
 
 -- | Get the kind of the type. Also checks that the type is well formed.
 kindOf :: Ty -> Tc Kind
@@ -218,13 +168,13 @@ alterBorrowCount i v s = do
     throwError $ CompilerLogicError msg (Just s)
   -- where f' i = let i' = f i in if i' < 0 then T.trace ("less than zero for " <> show v) i' else i'
 
+-- | Add a term variable to the context.
 addVar :: Var -> Span -> Ty -> Tc ()
 addVar v s ty = do
   ctx <- get
   case M.lookup v ctx.termVars of
     Just _ -> do
-      varLocs <- gets (.varLocs)
-      def <- case M.lookup v varLocs of
+      def <- case M.lookup v ctx.varLocs of
         Nothing -> error "varLocs was not properly synched to varTerms"
         Just (def,_) -> pure def
       throwError $ VarAlreadyInScope v s def
@@ -233,6 +183,15 @@ addVar v s ty = do
       sanityCheckType ty
       put $ ctx{termVars=M.insert v (0,ty) ctx.termVars
                ,varLocs=M.insert v (s,Nothing) ctx.varLocs}
+
+-- | Marks the removal of a list of variables from the scope.
+--
+-- Currently the error checking part of this is handled by
+-- `verifyCtxSubset`, so this is just to remove entries from
+-- `varLocs` that are no longer in scope.
+endVarScopes :: [Var] -> Tc ()
+endVarScopes vars = modify' \ctx -> ctx{varLocs=f ctx.varLocs} where
+  f m = foldl' (flip M.delete) m vars
 
 -- | Utility function that keeps varLocs in synch with termVars.
 deleteVar :: Var -> Span -> Tc ()
@@ -256,133 +215,13 @@ withKinds ks m = do
   unless (ks <> tvList == ctx2.localTypeVars) $ error "failed to drop a type variable"
   put $ ctx2{termVars=unshiftedTermVars, localTypeVars=tvList}
   pure val
-  where shiftTermTypes i = M.map (second $ rawTypeShift i 0)
+  where shiftTermTypes i = M.map (second $ typeShift i)
 
 -- | Utility function to add and drop kinds from the type context automatically.
 --
 -- Specialized version of `withKinds` that only takes one kind.
 withKind :: Kind -> Tc a -> Tc a
 withKind k = withKinds [k]
-
--- | Get a list of explicitly mentioned variables in the lifetime.
--- Ignores lifetime variables.
-lifetimeVars :: Ty -> Tc [Var]
-lifetimeVars = fmap ltSetToVars . lifetimeSet
-
--- | Get a list of explicitly mentioned variables and their spans
--- in the lifetime.
---
--- Ignores lifetime variables.
-lifetimeSVars :: Ty -> Tc [(Var, Span)]
-lifetimeSVars = fmap ltSetToSVars . lifetimeSet
-
--- | A lifetime type reduced down to its essence.
-type LtSet = S.HashSet (Span, Either TyVar Var)
-
--- | Convenience function for getting a list of variables and their locations
--- in the type from a lifetime set.
-ltSetToSVars :: LtSet -> [(Var, Span)]
-ltSetToSVars = mapMaybe f . S.toList where
-  f (s, Right v) = Just (v, s)
-  f _ = Nothing
-
--- | Convenience function for getting a list of variables from a lifetime set
-ltSetToVars :: LtSet -> [Var]
-ltSetToVars = fmap fst . ltSetToSVars
-
--- | Convert a lifetime set to a list of the lifetimes.
-ltSetToTypes :: LtSet -> [Ty]
-ltSetToTypes ltSet = fmap f $ S.toList ltSet where
-  f (s, Left x) = Ty s $ TyVar x
-  f (s, Right v) = Ty s $ LtOf v
-
--- | Get a set of all unique variables and lifetime variables mentioned in
--- the lifetime. This is the most granular set of lifetimes.
-lifetimeSet :: Ty -> Tc LtSet
-lifetimeSet Ty{span, tyf} = case tyf of
-  LtOf v -> pure $ S.singleton $ (span, Right v)
-  LtJoin ls -> S.unions <$> traverse lifetimeSet ls
-  TyVar x -> do
-    k <- lookupKind x span
-    case k of
-      LtKind -> pure $ S.singleton $ (span, Left x)
-      _ -> throwError $ ExpectedKind LtKind k span
-  _ -> throwError $ ExpectedKind LtKind TyKind span
-
--- | Get a set of all lifetimes referenced in a type relative to the context.
---
--- Specifically, this means that we do not add lifetimes in the input or output
--- of functions or in the body of a reference type.
---
--- It's important that the context type variable indices line up with those
--- in the type.
-ltsInTy :: Ctx -> Ty -> LtSet
-ltsInTy ctx typ = S.fromList $ f typ [] where
-  f Ty{span=s, tyf} l = case tyf of
-    LtOf v -> (s, Right v):l
-    TyVar tv -> case getKind tv of
-      LtKind -> (s, Left tv):l
-      TyKind -> l
-      TyOpKind _ _ -> l
-    FunTy _ _ lts _ -> f lts l
-    Univ _ lts _ _ _ -> f lts l
-    RefTy lt _ -> f lt l
-    _ -> foldr f l tyf
-  getKind tv@(MkTyVar n i) = case atMay ctx.localTypeVars i of
-    Just k -> k
-    Nothing -> error $ "type variable " <> show tv
-      <> " has no kind in context " <> show ctx.localTypeVars
-      <> "\nFound in type " <> show typ <> " span " <> show typ.span
-
--- | Get all lifetimes implied by borrows and copies inside a closure.
---
--- Context is the closure entrance context. Used to make sure
--- we only return lifetimes external to the closure.
-ltsBorrowedIn :: Ctx -> Tm -> LtSet
-ltsBorrowedIn ctx tm = S.fromList $ g 0 tm [] where
-  -- | `i` is the threshold counter used for telling which type variable is local.
-  g i tm@Tm{span=s, tmf} l = case tmf of
-    FunTm fix polyB argB t1 -> g (i + length polyB) t1 l
-    Copy v -> case M.lookup v ctx.termVars of
-      Just (_, Ty _ (RefTy (Ty _ (LtOf v)) _)) | M.member v ctx.termVars -> (s, Right v ):l
-      Just (_, Ty _ (RefTy (Ty _ (TyVar x)) _)) | x.index >= i -> (s, Left x ):l
-      _ -> l
-    RefTm v -> if M.member v ctx.termVars then (s, Right v ):l else l
-    _ -> foldr (g i) l tmf
-
--- | Infer the lifetimes mentioned in the types of all consumed values.
-ltsInConsumed :: Ctx -> Ctx -> LtSet
-ltsInConsumed c1 c2 = S.unions ltSets where
-  diff = M.difference c1.termVars c2.termVars
-  ltSets = ltsInTy c1 . snd <$> M.elems diff
-
--- | Infer the lifetimes for a closure type.
-ltsForClosure :: Ctx -> Ctx -> Tm -> LtSet
-ltsForClosure c1 c2 tm = S.union (ltsInConsumed c1 c2) $ ltsBorrowedIn c1 tm
-
--- | Add the value to the variables referenced in the type.
---
--- This means that it doesn't include the input and output of functions.
-adjustRef :: Int -> Ty -> Tc ()
-adjustRef i ty = do
-  ctx <- get
-  forM_ (ltSetToSVars $ ltsInTy ctx ty) $ uncurry $ alterBorrowCount i
-
--- | Modify the borrow count for the variables in the mentioned lifetime variables.
-adjustLts :: Int -> Ty -> Tc ()
-adjustLts i lty = lifetimeSVars lty >>= mapM_ (uncurry $ alterBorrowCount i)
-
-decrementLts :: Ty -> Tc ()
-decrementLts = adjustLts (-1)
-
-incrementLts :: Ty -> Tc ()
-incrementLts = adjustLts 1
-
--- | Does the type use the lifetime of this variable?
-isTyBorrowing :: Var -> Ty -> Bool
-isTyBorrowing v1 Ty{tyf} = case tyf of
-  LtOf v -> v == v1
-  _ -> or $ isTyBorrowing v1 <$> tyf
 
 -- | Get a list of all variables that reference the argument
 -- in their type.
@@ -394,6 +233,20 @@ variablesBorrowing v = do
         | otherwise = Nothing
       vars = mapMaybe f $ M.toList tv
   pure $ vars
+
+-- | Verify that no variables that should be handled inside a scope are escaping.
+--
+-- The span should be the span of the entire scope.
+verifyCtxSubset :: Span -> Tc a -> Tc a
+verifyCtxSubset s m = do
+  ctx1 <- get
+  v <- m
+  ctx2 <- get
+  unless (ctx2 `subsetOf` ctx1) $
+    let diff = M.difference ctx2.termVars ctx1.termVars
+        vars = fst <$> M.toList diff
+    in throwError $ VarsEscapingScope vars s
+  pure v
 
 -- | Drop the variable.
 dropVar :: Var -> Span -> Tc ()
@@ -423,6 +276,24 @@ dropVar v s = do
   -}
   deleteVar v s
 
+-- | Add the value to the variables referenced in the type.
+--
+-- This means that it doesn't include the input and output of functions.
+adjustRef :: Int -> Ty -> Tc ()
+adjustRef i ty = do
+  ctx <- get
+  forM_ (ltSetToSVars $ ltsInTy ctx ty) $ uncurry $ alterBorrowCount i
+
+-- | Modify the borrow count for the variables in the mentioned lifetime variables.
+adjustLts :: Int -> Ty -> Tc ()
+adjustLts i lty = lifetimeSVars lty >>= mapM_ (uncurry $ alterBorrowCount i)
+
+decrementLts :: Ty -> Tc ()
+decrementLts = adjustLts (-1)
+
+incrementLts :: Ty -> Tc ()
+incrementLts = adjustLts 1
+
 -- | Utility function for decrementing the borrow count of the referenced variable
 -- when we consume a reference term.
 useRef :: Ty -> Tc ()
@@ -433,38 +304,6 @@ useRef = adjustRef (-1)
 -- This means it does not include lifetimes in the input or output of functions.
 incRef :: Ty -> Tc ()
 incRef = adjustRef 1
-
-rawTypeShift :: Int -> Int -> Ty -> Ty
-rawTypeShift i c ty@Ty{span=s, tyf} = Ty s $ case tyf of
-  TyVar (MkTyVar t n) -> TyVar (MkTyVar t $ if n < c then n else n+i)
-  Univ m lts v k body -> Univ m (f lts) v k (rawTypeShift i (c+1) body)
-  _ -> f <$> tyf
-  where f = rawTypeShift i c
-
-typeShift :: Int -> Ty -> Ty
-typeShift i = rawTypeShift i 0
-
-rawTypeSub :: Int -> Ty -> Ty -> Ty
-rawTypeSub xi arg target@Ty{span=s, tyf} = case tyf of
-  TyVar v@(MkTyVar _ vi) -> if vi == xi then arg else Ty s $ TyVar v
-  Univ m lts v k body -> Ty s $ Univ m (f lts) v k $
-    rawTypeSub (xi+1) (typeShift 1 arg) body
-  _ -> Ty s $ f <$> tyf
-  where f = rawTypeSub xi arg
-
--- | Do type substitution on a type.
---
--- Argument, body
-typeSub :: Ty -> Ty -> Ty
-typeSub = rawTypeSub 0
-
--- | Do type application on the body of a `Univ` type, which
--- requires that we then upshift to account for the lost variable.
---
--- Argument, body
-typeAppSub :: Ty -> Ty -> Ty
-typeAppSub arg body = typeShift (-1) $
-  typeSub (typeShift 1 arg) body
 
 -- | Creates de-brujin indices for the type variables.
 --
@@ -513,14 +352,3 @@ indexTyVarsInTm = g 0 M.empty where
       pure $ Anno t1' ty'
     _ -> traverse f tmf
     where f = g i idxMap
-
--- | Substitute for the type parameter variables inside the fields of a
--- data type.
---
--- Type arguments, params, data type fields.
-applyTypeParams :: [Ty] -> [TypeParam] -> [Ty] -> [Ty]
-applyTypeParams args params members = go (length args - 1) args params members where
-  go i [] [] members = members
-  go i (a:as) (p:ps) members = go (i-1) as ps $
-    rawTypeSub i a <$> members
-  go i _ _ _ = error "Should be caught by kind check"

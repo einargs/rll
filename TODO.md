@@ -36,30 +36,16 @@ Thoughts
     to those variables to a specific marker. `Imp` will probably keep the same form since it
     doesn't reify the closure environment.
 - [X] Write name mangler.
+  - [ ] Test name mangler.
 - [X] Just go ahead and fully specialize the types now. `Imp` can use the same data
   structures probably, and this is the specialization stage.
+  - [ ] Test how fully specialized types that take higher kinded arguments are working.
 - [X] Fix the broken tests for type checking after syntax changed.
-- [X] Make the changes to the commented out test.
-- [X] Why shouldn't we call `incRef` on the type of a variable we add with `addVar`?
-  - No, I think we should be. I think rather than compensating for moves that's how we
-    deal with the problem.
-- [X] Make `alterBorrowCount` take a span and throw an error if it can't find that variable.
-- [ ] Write a test to see what happens when I pass a struct with multiple references to a variable
-  or multiple arguments that have a reference to a variable.
-  - I'm worried that instead of adding up mentions in moved and structs I should just be
-    doing a straight union? In moved I should add. I think because `ltsInTy` runs on the structs
-    it's all fine.
 - [ ] Write some tests to figure out how we should be tracking borrow counts for type variables.
   Because I have a sudden realization that I could write some bad code by using type variables.
   - Maybe? I mean, while a type variable lifetime exists we know it isn't deallocated, so isn't
     anything fine? And anything persisting has to be accounted for?
   - I'll have to actually reason this out.
-- [X] Could I rewrite `checkStableBorrowCounts` to instead use something like `ClosureEnv` as a
-  basis? That would save me from having to account for `Moved` stuff, though I'd have to take into
-  account `drop`s. No, I think it's better to check the raw borrow counts; less room for bugs.
-  - Or is there? Because as I've just seen borrow counts being stable doesn't really make sense
-    when there's moves happening. Maybe it's better to only check that the borrow counts of things
-    referenced are stable.
 - [ ] When synthesizing function types I need to make sure that I don't automatically make
   all Univ `Many`, because then a single-use context can be duplicated.
 - [ ] Add tests for closure environments in `Core`.
@@ -174,56 +160,11 @@ Future tests.
 
 # Eventual Polish
 These are eventual things to do for polishing.
-- [ ] For the `varLocs` thing used to help point to where a variable was dropped, I need to
-  locally scope it. Otherwise it can point to a variable being used after it was dropped
-  even if that was never in scope. Below it will say that `r3` was already dropped inside
-  `f` when we accidentally use `r3` instead of `u3` as a typo at the end of the test.
-  ```
-  struct Holder (a : Lifetime) { (&a Unit) (&a Unit) Unit }
-
-  test : Unit
-  = let u1 = Unit in
-  let f = \[l:Lifetime](h:&l (Holder 'u1)) ->
-    let Holder r1 r2 r3 = h in
-    let r2c = (r2 : &'u1 Unit) in
-    let r3c = r3 : &l Unit in
-    drop r1 in drop r2c in drop r3c in
-    Unit
-  in
-  let h = Holder ['u1] &u1 &u1 Unit in
-  let Unit = f ['h] &h in
-  let Holder r1 r2 u3 = h in
-  drop r1 in drop r2 in drop r3 in
-  let Unit = u3 in u1;
-  ```
-- [X] Improve the parse error message for the below. The last type for `r` is omitted, but it just
-  messes up. Maybe I should label the `ty` and `tm` constructors as type and term instead of just
-  the branches?
-  ```
-  let f = \(r:&'u1) (h:Holder 'u1) ->
-  ```
+- [ ] Would `checkStableBorrowCounts` be better if it used a `ClosureEnv`?
 - [ ] Make QuoteTxt remove excess indentation. And probably discard an empty first line? No.
-- [ ] Figure out a way to improve the error messages for when a function is referencing an argument
-  being passed to it. Right now the error is caught because we decrement `f`'s `lts` after we
-  check the argument (`u1`), but the `deleteVar` that removes `f` happens once we `synth` `f`.
-  ```
-  struct Holder (a : Lifetime) { &a Unit }
-  test : Unit
-  = let u1 = Unit in
-  let f = \(u:Unit) -> let ur = &u1 in
-    drop ur in u in
-  let Unit = f u1 in
-  Unit;
-  ```
 - [ ] Look into making `addVar` always call `incRef` on the type. Right now the problem is
   `letClause`.
-- [X] Label all the parser nodes for better error messages.
-- [X] I'm going to need like a `SpanVar` type for e.g. function arguments where I want to be able
-  to point at it.
-- [X] Add a `BuiltinType` to `DataType` for `String` and `I64`.
-- [X] I may want to rewrite the whole LtSet stuff to keep the spans of the types around.
-- [X] Make sure variable names and such are strict text.
-- [X] Rewrite to use recursion schemes.
+- [ ] Maybe rewrite to use the full recursion schemes library.
 - [ ] Let you write applying multiple types as a comma separated list?
   - Eh, not a big deal since I want to eventually use inference for that.
   - I do want to improve error messages for if you accidentally put a type application
@@ -243,8 +184,6 @@ These are eventual things to do for polishing.
 - [ ] Probably create a dedicated type equality thing that ignores TyVarBinding etc so that equality
   means equality.
   - How will I handle testing then?
-- [X] A map holding info about where variables are dropped so I can give nice error messages about stuff
-  being dropped.
 - [ ] Rewrite some of my error messages to assume the specified type is correct not the term.
 - [ ] Allow me to ommit the empty lifetime brackets in functions.
 - [ ] How exactly does lexeme decide whether it needs to consume space at the end or not?
@@ -260,28 +199,23 @@ These are eventual things to do for polishing.
   `sanityCheckType` for it.
   - I don't think I want to do this.
 - [ ] Allow mutually recursive functions and using a function before it's defined.
-- [X] Figure out a way to automatically detect that we can use moving a reference into a closure to
-  resolve what would be an imbalance instead of borrowing or copying. Below, there's an error because
-  it assumes that we're just dropping c1 without figuring out that we want to move c1 into that closure.
-  - This may actually be a fair assumption; we'll see how much of a problem this is with real code.
-  ```
-  test : Unit
-  = let u1 = Unit in let u2 = Unit in
-  let other = ((\u ->
-    let c1 = &u1 in \y ->
-      let Unit = u in
-      let c2 = &u2 in
-      drop c1 in drop c2 in y)
-      : forall M ['u1, 'u2] t : Type.
-        Unit -M['u1, 'u2]>
-        t -S['u1, 'u2]> t) in
-  let Int = other [Int] Unit Int in
-  let Unit = u1 in let Unit = u2 in Unit;
-  ```
 
 ## Better Errors
 - [X] Improve the context join error to highlight the areas that conflict and label them directly
   with the conflicting variables.
+- [X] Label all the parser nodes for better error messages.
+- [ ] Figure out a way to improve the error messages for when a function is referencing an argument
+  being passed to it. Right now the error is caught because we decrement `f`'s `lts` after we
+  check the argument (`u1`), but the `deleteVar` that removes `f` happens once we `synth` `f`.
+  ```
+  struct Holder (a : Lifetime) { &a Unit }
+  test : Unit
+  = let u1 = Unit in
+  let f = \(u:Unit) -> let ur = &u1 in
+    drop ur in u in
+  let Unit = f u1 in
+  Unit;
+  ```
 - [ ] Eventually every error should have a test to make sure it triggers correctly.
 - [ ] Make type arguments in lambdas bind a Span to the TyVarBinding or whatever for better error
   messages.

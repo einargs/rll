@@ -6,7 +6,7 @@ module Rll.Spec
 import Rll.Ast
 import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName)
 import Rll.Core
-import Rll.Tc (rawTypeSub, applyTypeParams)
+import Rll.TypeSub (rawTypeSub, applyTypeParams)
 import Rll.SpecIR
 
 import Data.HashMap.Strict qualified as M

@@ -4,15 +4,16 @@ module Rll.TypeCheck where
 import Rll.Ast
 import Rll.TypeError
 import Rll.Context
-import Rll.Tc
+import Rll.TcTools
+import Rll.TcMonad
 import Rll.Core
+import Rll.LtSet
+import Rll.TypeSub (applyTypeParams, typeAppSub)
 
 import Control.Monad (unless, when, forM_, forM)
 import Data.Text (Text)
 import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
-import Control.Monad.State (MonadState(..), gets)
-import Control.Monad.Except (MonadError(..))
 import Data.List (find, unzip4, foldl')
 import Data.Maybe (catMaybes)
 import Debug.Trace qualified as D
@@ -47,20 +48,6 @@ useVar v s = do
     Nothing -> case M.lookup v ctx.moduleFuns of
       Just ty -> pure $ Core ty s $ ModuleVarCF v
       Nothing -> expectedTermVar v s
-
--- | Verify that no variables that should be handled inside a scope are escaping.
---
--- The span should be the span of the entire scope.
-verifyCtxSubset :: Span -> Tc a -> Tc a
-verifyCtxSubset s m = do
-  ctx1 <- get
-  v <- m
-  ctx2 <- get
-  unless (ctx2 `subsetOf` ctx1) $
-    let diff = M.difference ctx2.termVars ctx1.termVars
-        vars = fst <$> M.toList diff
-    in throwError $ VarsEscapingScope vars s
-  pure v
 
 data TcMethod = Check Ty | Synth
 
@@ -155,6 +142,7 @@ caseClause caseSpan t1 branches tcMethod = do
   pure $ Core (head cores).ty caseSpan $ CaseCF t1Core coreBranches
   where
     method = useTcMethod tcMethod
+
     ensureEnum :: Ty -> Tc (Var, M.HashMap Text [Ty])
     ensureEnum enumTy = do
       (tyName, conMap) <- getEnumCaseMap enumTy
@@ -170,6 +158,7 @@ caseClause caseSpan t1 branches tcMethod = do
         Just (name,_) -> throwError $ MultBranchesForCase name caseSpan
         Nothing -> pure ()
       pure (tyName, conMap)
+
     getEnumCaseMap :: Ty -> Tc (Var, M.HashMap Text [Ty])
     getEnumCaseMap enumTy = do
       let err t = throwError $ TypeIsNotEnum t $ getSpan t1
@@ -179,6 +168,7 @@ caseClause caseSpan t1 branches tcMethod = do
         EnumType _ tyParams conMap _ -> do
           pure $ (tyName, M.map (applyTypeParams args tyParams) conMap)
         _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
+
     -- | Type check a branch of the case expression.
     handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch Tm -> Tc Core
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
@@ -189,7 +179,9 @@ caseClause caseSpan t1 branches tcMethod = do
             $ BadEnumCaseVars vars varTys caseSpan
           let members = zip vars varTys
           forM_ members $ uncurry addMember
-          method body
+          val <- method body
+          endVarScopes $ (.var) <$> vars
+          pure val
 
 -- | Take a type that should be for a fully applied struct and get the types
 -- of the members with all type arguments applied.
@@ -230,13 +222,16 @@ letStructClause letSpan structCon memberVars t1 body method = do
         throwError $ BadLetStructVars memberVars memberTys
       let members = zip memberVars memberTys
       forM_ members $ uncurry addMember
-      method body
+      val <- method body
+      endVarScopes $ (.var) <$> memberVars
+      pure val
 
 letClause :: Span -> SVar -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letClause s x t1 t2 f = do
   t1Core <- synth t1
   addVar x.var s t1Core.ty
   t2Core <- f t2
+  endVarScopes [x.var]
   pure $ Core t2Core.ty s $ LetCF x t1Core t2Core
 
 -- | Given an entrance and exit context, we see which variables in the
@@ -293,6 +288,7 @@ mkClosureSynth s body addVars act = do
   let lts = Ty s $ LtJoin $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
   checkStableBorrowCounts s addVars startCtx endCtx
+  endVarScopes $ (\(v,_,_) -> v) <$> addVars
   pure $ (lts, mult, out)
 
 -- | Calculate what variables a closure needs from the context.
@@ -387,6 +383,8 @@ mkClosureCheck s body mult lts addVars m = do
 
   checkStableBorrowCounts s addVars startCtx endCtx
 
+  endVarScopes $ (\(v,_,_) -> v) <$> addVars
+
   pure val
 
 checkFunTm :: Span -> Maybe SVar -> [(TyVarBinding, Kind)]
@@ -466,6 +464,7 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       addVar funVar.var funVar.span refTy
       bodyCore <- act
       dropVar funVar.var funVar.span
+      endVarScopes [funVar.var]
       pure bodyCore
 
 -- | Synthesize the type of a type application.
