@@ -1232,6 +1232,16 @@ spec = parallel do
         s2 : String = "Everyone";
         |]
 
+    it "can check multiple argument multi-use functions" do
+      baseTest [txt|
+        multi : forall M [] l : Lifetime.
+          &l Unit -M[]> Unit -M[l]> Unit
+        = \r ->
+        let f = \(x:Unit) -> let rc =
+          copy r in drop rc in x
+        in drop r in f;
+        |]
+
     it "correctly scopes information about when variables were dropped" do
       -- We're checking to make sure it throws UnknownTermVar rather than
       -- RemovedTermVar. This means that information about when a variable

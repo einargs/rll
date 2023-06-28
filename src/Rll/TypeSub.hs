@@ -42,10 +42,9 @@ typeAppSub arg body = typeShift (-1) $
 -- | Substitute for the type parameter variables inside the fields of a
 -- data type.
 --
--- Type arguments, params, data type fields.
-applyTypeParams :: [Ty] -> [TypeParam] -> [Ty] -> [Ty]
-applyTypeParams args params members = go (length args - 1) args params members where
-  go i [] [] members = members
-  go i (a:as) (p:ps) members = go (i-1) as ps $
+-- Type arguments, data type fields.
+applyTypeParams :: [Ty] -> [Ty] -> [Ty]
+applyTypeParams args members = go (length args - 1) args members where
+  go i [] members = members
+  go i (a:as) members = go (i-1) as $
     rawTypeSub i a <$> members
-  go i _ _ _ = error "Should be caught by kind check"

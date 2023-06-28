@@ -21,7 +21,7 @@ import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Safe (atMay)
 
 newtype Tc a = MkTc { unTc :: StateT Ctx (Except TyErr) a }
-  deriving (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
+  deriving newtype (Functor, Applicative, Monad, MonadError TyErr, MonadState Ctx)
 
 runTc :: Ctx -> Tc a -> Either TyErr (a, Ctx)
 runTc ctx = runExcept . flip runStateT ctx . unTc

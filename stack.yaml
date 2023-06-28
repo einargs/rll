@@ -48,6 +48,12 @@ packages:
 extra-deps:
 - github: einargs/errata
   commit: 03b05e1c355063b516f6b3d993d6498deaf94e36
+- github: llvm-hs/llvm-hs
+  commit: 80e0de0f96eb78288c88fda0eaba0f7cf5d38a30
+  subdirs:
+  - llvm-hs-pure
+  - llvm-hs
+  # llvm-12  423220bffac4990d019fc088c46c5f25310d5a33
 
 # Override default flag values for local packages and extra-deps
 # flags: {}

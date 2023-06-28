@@ -29,6 +29,7 @@ library
       Rll.Ast
       Rll.Context
       Rll.Core
+      Rll.GenLLVM
       Rll.LtSet
       Rll.Parser
       Rll.Spec
@@ -73,14 +74,23 @@ library
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
+      DeriveAnyClass
+      BangPatterns
+      DuplicateRecordFields
+      DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls
   build-depends:
-      base >=4.7 && <5
+      aeson >=2.1.1
+    , base >=4.7 && <5
+    , bytestring >=0.11
     , containers >=0.6.2
     , errata >=0.4
+    , filepath >=1.4.2
     , hashable >=1.4
     , hspec >=2.9.7
     , hspec-megaparsec >=2.2
+    , llvm-hs >=15.0
+    , llvm-hs-pure >=15.0
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1
@@ -130,14 +140,23 @@ executable rll-exe
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
+      DeriveAnyClass
+      BangPatterns
+      DuplicateRecordFields
+      DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base >=4.7 && <5
+      aeson >=2.1.1
+    , base >=4.7 && <5
+    , bytestring >=0.11
     , containers >=0.6.2
     , errata >=0.4
+    , filepath >=1.4.2
     , hashable >=1.4
     , hspec >=2.9.7
     , hspec-megaparsec >=2.2
+    , llvm-hs >=15.0
+    , llvm-hs-pure >=15.0
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1
@@ -158,6 +177,8 @@ test-suite rll-test
       QuoteTxt
       Rll.AstUtil
       Rll.ParserSpec
+      Rll.ScSpec
+      Rll.ScSpecUtil
       Rll.TcSpecUtil
       Rll.TypeCheckSpec
       Paths_rll
@@ -194,14 +215,23 @@ test-suite rll-test
       ImportQualifiedPost
       OverloadedRecordDot
       DeriveTraversable
+      DeriveAnyClass
+      BangPatterns
+      DuplicateRecordFields
+      DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      base >=4.7 && <5
+      aeson >=2.1.1
+    , base >=4.7 && <5
+    , bytestring >=0.11
     , containers >=0.6.2
     , errata >=0.4
+    , filepath >=1.4.2
     , hashable >=1.4
     , hspec >=2.9.7
     , hspec-megaparsec >=2.2
+    , llvm-hs >=15.0
+    , llvm-hs-pure >=15.0
     , megaparsec >=9.3.0
     , mtl >=2.2
     , prettyprinter >=1.7.1

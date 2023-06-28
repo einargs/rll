@@ -8,21 +8,37 @@ import Rll.Ast
 import Rll.Context (DataType)
 
 import Data.Text (Text)
+import Prettyprinter
 import Data.HashMap.Strict qualified as M
+import Data.Aeson (FromJSON(..), ToJSON(..))
+import GHC.Generics (Generic)
 
 data ClosureUse a
   = Moved a
   | Refd a
   | Copied a
-  deriving (Show, Eq)
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 newtype ClosureEnv = ClosureEnv
   { envMap :: M.HashMap Var (ClosureUse Ty)
   }
-  deriving (Eq)
+  deriving (Eq, Show)
 
-instance Show ClosureEnv where
-  showsPrec i ce = showsPrec i ce.envMap
+instance FromJSON ClosureEnv where
+  parseJSON = fmap (ClosureEnv . M.fromList) . parseJSON
+
+instance ToJSON ClosureEnv where
+  toJSON (ClosureEnv m) = toJSON $ M.toList m
+
+instance Pretty ClosureEnv where
+  pretty (ClosureEnv m)
+    | m == M.empty = "{}"
+    | otherwise = "{" <+> align (vsep mems) <+> "}" where
+      mems = punctuate "," $ toMem <$> M.toList m
+      toMem (v, Moved ty) = "moved" <+> pretty v <+> "=" <+> pretty ty
+      toMem (v, Refd ty) = "refd" <+> pretty v <+> "=" <+> pretty ty
+      toMem (v, Copied ty) = "copied" <+> pretty v <+> "=" <+> pretty ty
 
 -- | This IR is produced during type checking and annotates every
 -- term with its type.

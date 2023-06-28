@@ -46,36 +46,47 @@ Thoughts
   - Maybe? I mean, while a type variable lifetime exists we know it isn't deallocated, so isn't
     anything fine? And anything persisting has to be accounted for?
   - I'll have to actually reason this out.
-- [ ] When synthesizing function types I need to make sure that I don't automatically make
+- [X] When synthesizing function types I need to make sure that I don't automatically make
   all Univ `Many`, because then a single-use context can be duplicated.
 - [ ] Add tests for closure environments in `Core`.
-- [ ] Clean up commented out code in `TypeCheck.hs`.
-- [ ] Add an error to `TypeCheck.hs` that requires that we have a `main` entry point
-  in each module that I can start specializing from.
-- [ ] Move the type substitution stuff to another file so that `Spec.hs` doesn't
+- [X] Move the type substitution stuff to another file so that `Spec.hs` doesn't
   need to directly import `Tc.hs`
-  - [ ] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
+  - [X] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
     stuff can just import that and be in it's own module.
-- [ ] Figure out how to write tests for `Spec`. Maybe I'll write a custom parser?
-  - Can just `Fix` `SpecF` too, and then write a custom comparison function.
-- [ ] let's go and rewrite the parser so that all polymorphic function definition
-  happens in a `let x y = ... in` or function definition. Lambdas are strictly normal.
-  - This will make things easier I think?
+- [ ] Double check that the order of members in struct decls isn't getting reversed.
+  (I think it is. Maybe it's just a glitch in pretty printing.)
 
 Spec tests
+- [ ] I'll write the tests by having a good pretty printer and manually checking that
+  it looks right, then getting a serialized output and sticking it in.
+  - I'll use `Aeson` package.
 - [ ] Make sure that you can't alias a polymorphic function.
 - [ ] Write tests for how specializing references to functions should work.
+- [ ] Add a pass to the spec stuff that iterates over all of the produced types
+  in the spec IR and makes sure there's no type variables.
 
 ## Imp
 - The `Imp` stage will have specific "instructions" for whether a function is
   immediately invoked or is partially applied and results in a thunk.
+- Mechanically I think `VarSF` and `CopySF` become the exact same thing when dealing with
+  a reference: copying the pointer.
+- [ ] I need to implement Box and a recursive check by this point, because otherwise
+  recursive data types are infinite in size.
 - [ ] Make explicit the types of partially applied functions etc.
   - How do constructors play into this? I guess they have to be partially applied functions.
     Later I can optimize and do runtime trickery.
+  - I have to write a calling convention that can call both equally well, right?
 - [ ] Maybe want to start including the data type in each case and let struct
   in the `Core` stage? We'll see if this is useful for `Imp`.
 
+
 ## LLVM
+- [ ] Get `llvm-hs-pure` installed. I may need to downgrade my stackage version.
+  - Currently it conflicts with bytestring `0.11.3` which my current resolver
+    uses.
+  - The latest stackage resolver with `llvm-hs-pure` in it is `lts-19.33`.
+  - I might use an older resolver and then force it to use a GHC version that
+    has my lovely overloaded-record-dots.
 - [ ] Install LLVM.
 - [ ] Get a micro-example of a module compiling with some literal llvm code.
 - [ ] Write out a compile monad for turning Elab into LLVM.
@@ -90,6 +101,7 @@ Spec tests
     might be able to call.
   - Maybe look at how Dex does this? See Google Keep notes.
 - [ ] How to call a print in llvm.
+
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -120,6 +132,66 @@ When we implement traits, I think that `Spec` will be where we elaborate all of 
   - [ ] Read through the annotations you can add to see what I can tell LLVM.
   - [ ] Run various LLVM optimization passes to see what they can do.
   - [ ] Try the passes on larger examples.
+- [ ] Implement uncurrying.
+  - In `Spec` if I find situations of `let f = ClosureCall f in ...` then I can propagate that `f` out
+    to later usages of it. That will help me immediately invoke the function. (This is part of uncurrying.)
+
+## Calling Methods
+- `ClosureEnv` will be translated to a struct when we translate to LLVM.
+
+- Partially applied constructors will have functions wrapped around them for eta-expansion.
+  - `Spec` layer.
+- All function values will be a pointer to a heap allocated object with all the information
+  needed for partial applications.
+  - The layout of the object is:
+    * the function pointer
+    * arity of the function
+    * number of arguments in the pointer
+    * array of accumulated arguments
+  - This will be a generated struct.
+    - The guarentees of single-use and multi-use functions will ensure that if we have multiple
+      versions memcpying them will be safe.
+- All functions have an arity `n`. They can be applied to fewer or more values than `n` (if it
+  returns a function). `n` is, in essence, the number of arguments to the compiled llvm function.
+- Closures will accept an environment structure as the first argument.
+  - This will contain all referenced and moved values.
+- Calls to *known* functions can do one of two things: if there are enough arguments to fully
+  saturate the known function's arity, then we just immediately invoke it. Otherwise we turn
+  it into a partial application object on the heap.
+- Eventually we will have two functions for each function. One that actually runs the code,
+  which can be immediately invoked, and one that unpacks info from the context pointer.
+  - Theoretically it will be better to have this basically be two contigous pieces of code
+    that fall through instead of actually jumping. Hopefully LLVM can do that optimization
+    itself.
+  - For now we're just going to implement all functions as taking the context pointer and
+    and unpacking args from that.
+- Every time we add arguments to a non-statically known function we will check if we have
+  fully saturated the arity and then load it all in.
+- According to a paper, eval/apply is the superior method.
+  - Eval/apply basically tracks the arity of the function in the function closure and makes
+    the caller check whether there are enough arguments to call yet.
+  - Paper: https://www.cs.tufts.edu/comp/150FP/archive/simon-peyton-jones/eval-apply-jfp.pdf
+
+Implement In Spec
+- [ ] For partially applied constructors, generate a corresponding function that immediately
+  calls the constructor that we can partially apply.
+
+Later optimizations
+- [ ] Annotate function declarations with a sequence of statically known arities of functions
+  to help with generating code that immediately invokes it.
+- [ ] Generate two functions for each actual function: one that actually does the code,
+  which can be immediately invoked, and one that 
+- [ ] When we have a statically known function, we can use the known arity to immediately
+  invoke it without having to package shit up.
+
+### Papers
+- Talking about uncurrying for immediate calling of a function pointer.
+  https://xavierleroy.org/publi/higher-order-uncurrying.pdf
+- Defunctionalization.
+  https://dl.acm.org/doi/10.1145/3591260
+- Comparing eval/apply and push/enter as ways to deal with currying functions.
+  https://www.cs.tufts.edu/comp/150FP/archive/simon-peyton-jones/eval-apply-jfp.pdf
+  - pg 426 starts a discussion of actual implementation.
 
 # Future Tests
 Future tests.
@@ -160,6 +232,11 @@ Future tests.
 
 # Eventual Polish
 These are eventual things to do for polishing.
+- [ ] Improve pretty printing for multiple type applications. Right now `Pair I64 String`
+  becomes `(Pair I64) String`.
+- [ ] Improve pretty printing of `SpecIR`; parentheses are messed up.
+- [ ] Pretty printing specialization errors?
+  - [ ] A specific error for no `main` function to be an entry point.
 - [ ] Would `checkStableBorrowCounts` be better if it used a `ClosureEnv`?
 - [ ] Make QuoteTxt remove excess indentation. And probably discard an empty first line? No.
 - [ ] Look into making `addVar` always call `incRef` on the type. Right now the problem is
@@ -231,6 +308,9 @@ These are eventual things to do for polishing.
 
 # Feature Thoughts
 Thoughts about various future features.
+- [ ] let's go and rewrite the parser so that all polymorphic function definition
+  happens in a `let x y = ... in` or function definition. Lambdas are strictly normal.
+  - This will make things easier I think?
 - [ ] Allow type annotation on `let` expressions: ``let v : T = ... in ...`
 - If I ever want to be able to specify the return type I'll need to change from an arrow to a dot.
   But I'll probably switch to defining them with `let f x y = ...`
@@ -248,6 +328,26 @@ Thoughts about various future features.
 - [ ] Operators.
   - Very useful module that can build an expression parser given a table of operators.
     https://hackage.haskell.org/package/parser-combinators-1.3.0/docs/Control-Monad-Combinators-Expr.html
+- Eventually lookup global flow analysis stuff.
+- [ ] Look at how to make a function that returns multi-use functions easy. I think this basically
+  means figuring out if the arguments are copyable and then doing them that way.
+  - Currently this doesn't work:
+    ```
+    multi : forall M [] l : Lifetime.
+      &l Unit -M[]> Unit -M[l]> Unit
+    = \r x -> drop r in x;
+    ```
+  - Instead we have to do this. Note that this works because we assume a lifetime type variable
+    lasts the entire function.
+    ```
+    multi : forall M [] l : Lifetime.
+      &l Unit -M[]> Unit -M[l]> Unit
+    = \r ->
+    let f = \(x:Unit) -> let rc =
+      copy r in drop rc in x
+    in drop r in f;
+    ```
+- [ ] Check if I can use types before they're declared in either other types or functions.
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.
@@ -255,3 +355,6 @@ Thoughts about various future features.
 - I finally worked out the difference between system f and f omega -- applying types at the type level.
 - I'm going to just say that we should never have a subzero borrow count. Optimizations like
   that kind of "eventual consistency" open up way too many headaches.
+- My type substitution code is horrifically inefficient. If there's a slowdown, look over there.
+  - Especially note the way that when I do it on `Core` it means that there's no more sharing of `Ty` objects
+    in `Core` stuff.

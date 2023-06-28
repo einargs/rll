@@ -36,6 +36,11 @@ dependencies:
 - errata >= 0.4
 - vector >= 0.12
 - recursion-schemes >= 5.2.2
+- aeson >= 2.1.1
+- bytestring >= 0.11
+- filepath >= 1.4.2
+- llvm-hs-pure >= 15.0
+- llvm-hs >= 15.0
 
 default-extensions:
 - BlockArguments
@@ -68,6 +73,10 @@ default-extensions:
 - ImportQualifiedPost
 - OverloadedRecordDot
 - DeriveTraversable
+- DeriveAnyClass
+- BangPatterns
+- DuplicateRecordFields
+- DerivingStrategies
 
 ghc-options:
 - -Wincomplete-patterns

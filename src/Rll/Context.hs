@@ -1,6 +1,6 @@
 module Rll.Context
   ( Ctx(..), DataType(..), localEq, onTermVars, subsetOf, diffCtxTerms, emptyCtx
-  , BuiltInType(..), getDataTypeName
+  , BuiltInType(..), getDataTypeName, getDataConArgNum
   ) where
 
 import Data.HashMap.Strict qualified as M
@@ -89,8 +89,20 @@ data DataType
 instance Show DataType where
   show = unpack . getDataTypeName
 
+-- | Get the name of a data type.
 getDataTypeName :: DataType -> Text
 getDataTypeName dt = case dt of
   EnumType n _ _ _ -> n
   StructType n _ _ _ -> n
   BuiltInType enum -> getBuiltInName enum
+
+-- | Get the number of arguments a data constructor accepts.
+getDataConArgNum :: DataType -> Var -> Int
+getDataConArgNum dt con = case dt of
+  EnumType name tyParams m _ -> case M.lookup con.name m of
+    Just args -> length args
+    Nothing -> error "Constructor mismatch; should be caught by type checking"
+  StructType name tyParams members _ -> length members
+  BuiltInType b -> case b of
+    BuiltInI64 -> error "has no constructor"
+    BuiltInString -> error "has no constructor"

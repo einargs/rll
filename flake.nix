@@ -29,7 +29,7 @@
     hPkgs = haskell.packages.${compiler};
   in {
     devShells.x86_64-linux.default = mkShell {
-      buildInputs = [ stack-wrapped zlib ispell ]
+      buildInputs = [ stack-wrapped zlib ispell llvmPackages_15.libllvm ]
           ++ (with hPkgs; [
             haskell-language-server ghc
           ])

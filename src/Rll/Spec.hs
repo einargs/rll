@@ -1,10 +1,11 @@
-{-# LANGUAGE BangPatterns #-}
 module Rll.Spec
-  (
+  ( specModule
+  , SpecErr(..)
+  , prettyDeclMap
   ) where
 
 import Rll.Ast
-import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName)
+import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName, getDataConArgNum)
 import Rll.Core
 import Rll.TypeSub (rawTypeSub, applyTypeParams)
 import Rll.SpecIR
@@ -15,31 +16,12 @@ import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Data.List (foldl')
 import Control.Exception (assert)
 import Data.Text (Text)
-
--- | Eventually we will need this to hold things like the type argument
--- to a `Box`.
-data SpecBuiltIn
-  = SpecI64
-  | SpecString
-  deriving Show
-
--- | A specialized data type with fully concrete types.
---
--- We remove the enum name since now we've mangled it.
-data SpecDataType
-  = SpecEnum (M.HashMap Text [Ty])
-  | SpecStruct Text [Ty]
-  -- | We do a translation stage to include any type arguments to
-  -- things like `Box`.
-  | SpecBuiltIn SpecBuiltIn
-  deriving Show
-
--- | A declaration that has been specialized to have fully concrete types
--- with no type variables in them.
-data SpecDecl
-  = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty)] SpecIR
-  | SpecDataType SpecDataType
-  deriving Show
+import Data.Text qualified as T
+import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson qualified as A
+import GHC.Generics (Generic)
+import Prettyprinter
+-- import Debug.Trace qualified as D
 
 data Lambda = PolyLambda
   { fix :: Maybe SVar
@@ -78,10 +60,17 @@ data SpecErr
   --
   -- Span of the lambda.
   | NoImmediateSpec Span
+  -- | Cannot find the data type in `specDecls`.
+  | NoSpecDataType MVar
   deriving (Show, Eq)
 
 newtype Spec a = MkSpec { unSpec :: StateT SpecCtx (Except SpecErr) a }
-  deriving (Functor, Applicative, Monad, MonadError SpecErr, MonadState SpecCtx)
+  deriving newtype (Functor, Applicative, Monad, MonadError SpecErr, MonadState SpecCtx)
+
+-- | Pretty print a map of declarations.
+prettyDeclMap :: M.HashMap MVar SpecDecl -> Doc ann
+prettyDeclMap m = vsep $ f <$> M.toList m where
+  f (v, sd) = pretty v <+> pretty sd
 
 -- | Get an unspecialized core function.
 getCoreFun :: Var -> Spec Core
@@ -112,6 +101,11 @@ typeSubInCore tyCtx = go 0 where
     goTy baseTy = foldl' g baseTy $ zip [0..] tyCtx
     f = go xi
 
+-- | Substitute type arguments into the types of arguments.
+typeSubInArgs :: [Ty] -> [(SVar, Ty)] -> [(SVar, Ty)]
+typeSubInArgs subTys args = zip vars $ applyTypeParams subTys tys where
+  (vars, tys) = unzip args
+
 -- | Utility function that checks if a declaration already
 -- has been created. If it hasn't, it builds and registers
 -- it.
@@ -138,12 +132,67 @@ specDataType dt tyArgs = guardDecl name $ pure specDt
   name = mangleDataType (getDataTypeName dt) tyArgs
   specDt = SpecDataType $ case dt of
     EnumType name tyParams cases _ -> SpecEnum $
-      applyTypeParams tyArgs tyParams <$> cases
+      applyTypeParams tyArgs <$> cases
     StructType con tyParams fields _ -> SpecStruct con $
-      applyTypeParams tyArgs tyParams fields
+      applyTypeParams tyArgs fields
     BuiltInType enum -> SpecBuiltIn $ case enum of
       BuiltInI64 -> assert (tyArgs == []) $ SpecI64
       BuiltInString -> assert (tyArgs == []) $ SpecString
+
+lookupSpecDataType :: MVar -> Spec SpecDataType
+lookupSpecDataType v = do
+  specDecls <- gets (.specDecls)
+  case M.lookup v specDecls of
+    Just (SpecDataType dt) -> pure dt
+    _ -> throwError $ NoSpecDataType v
+
+-- | Generate a function wrapper around a data constructor to
+-- allow for partial application.
+--
+-- NOTE: in the future, I could rewrite this to allow capturing the
+-- already provided arguments. But that means calculating a ClosureEnv
+-- and a bunch of extra code.
+genDataConFun :: MVar -> Var -> DataType -> [Ty] -> Spec MVar
+genDataConFun dtVar conVar rawDT tyArgs = do
+  let conFunVar = mangleDataConFun dtVar conVar
+  guardDecl conFunVar do
+    sdt <- lookupSpecDataType dtVar
+    let dtName = Var $ getDataTypeName rawDT
+        dtSpan = case rawDT of
+          StructType _ _ _ s -> s
+          EnumType _ _ _ s -> s
+          BuiltInType b -> error "temp: neither I64 or string has a constructor"
+        argTys = case sdt of
+          SpecStruct _ mems -> mems
+          SpecEnum m -> case M.lookup conVar.name m of
+            Nothing -> error "should be caught by typechecking"
+            Just mems -> mems
+          SpecBuiltIn _ -> error "temp: neither I64 or string has a constructor"
+        mkName i = Var $ "arg" <> T.pack (show i)
+        argVars = mkName <$> [0..length argTys]
+        funArgs = zipWith (\v ty -> (SVar v ty.span, ty)) argVars argTys
+        argExprs = zipWith (\v ty -> (SpecIR ty dtSpan $ VarSF v)) argVars argTys
+        f :: Ty -> Ty -> Ty
+        f base arg = Ty dtSpan $ TyApp base arg
+        irRetTy = foldl' f (Ty dtSpan $ TyCon dtName) tyArgs
+        ir = SpecIR irRetTy dtSpan $ ConSF dtVar conVar argExprs
+    pure $ SpecFun (ClosureEnv M.empty) Nothing funArgs ir
+
+-- | Generate the `SpecIR` for a data constructor, specialize the
+-- data type involved, and generate a partially applied function if necessary.
+specDataCon :: DataType -> Var -> Span -> Ty -> [Ty] -> [SpecIR] -> Spec (SpecF SpecIR)
+specDataCon dt conVar conSpan conTy tyArgs args = do
+  let requiredArgCount = getDataConArgNum dt conVar
+      argCount = length args
+  dtMVar <- specDataType dt tyArgs
+  case compare argCount requiredArgCount of
+    GT -> error "More arguments than constructor takes; should be caught in type checking"
+    EQ -> do
+      pure $ ConSF dtMVar conVar args
+    LT -> do
+      fvar <- genDataConFun dtMVar conVar dt tyArgs
+      let f = SpecIR conTy conSpan $ ClosureSF fvar (ClosureEnv M.empty)
+      pure $ AppSF f args
 
 -- | function for specializing the body of functions.
 specExpr :: Core -> Spec SpecIR
@@ -162,21 +211,28 @@ specExpr core@Core{span, coref} = do
     RefCF v -> pure $ sf $ RefSF v
     CopyCF v -> pure $ sf $ CopySF v
     DropCF sv t1 -> fmap sf $ DropSF sv <$> specExpr t1
-    -- The `Imp` stage will work out the explict thunks when
-    -- partial application happens.
-    AppTmCF t1 args -> fmap sf $ AppSF <$> specExpr t1 <*> traverse specExpr args
     LiteralCF lit -> pure $ sf $ LiteralSF lit
-    ConCF dt v -> do
-      mvar <- specDataType dt []
-      pure $ sf $ ConSF mvar v
-    CaseCF t1 branches -> fmap sf $ CaseSF <$>
-      specExpr t1 <*> traverse (traverse specExpr) branches
+    ConCF dt v -> sf <$> specDataCon dt v span core.ty [] []
+    AppTmCF t1 args -> do
+      case t1.coref of
+        -- Because we want to immediately invoke appropriate constructors
+        -- we do this.
+        AppTyCF (Core _ conSpan (ConCF dt conVar)) tyArgs -> do
+          args' <- traverse specExpr args
+          sf <$> specDataCon dt conVar conSpan t1.ty tyArgs args'
+        ConCF dt conVar -> do
+          args' <- traverse specExpr args
+          sf <$> specDataCon dt conVar t1.span t1.ty [] args'
+        _ -> do
+          t1' <- specExpr t1
+          args' <- traverse specExpr args
+          pure $ sf $ AppSF t1' args'
     AppTyCF t1 tys -> case t1.coref of
+      ConCF dt var -> sf <$> specDataCon dt var span core.ty tys []
+        -- mvar <- specDataType dt tys
+        -- pure $ sf $ ConSF mvar var
       -- Recursive functions should be picked up here as well.
       LocalVarCF v -> sf <$> specLocalFun v tys
-      ConCF dt var -> do
-        mvar <- specDataType dt tys
-        pure $ sf $ ConSF mvar var
       ModuleVarCF v -> do
         mvar <- specFunDef v tys
         pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
@@ -184,6 +240,8 @@ specExpr core@Core{span, coref} = do
       -- NOTE: how do we handle trying to specialize a reference?
       -- I think that's automatically rejected?
       _ -> error "Can't specialize this? Not certain if this can happen."
+    CaseCF t1 branches -> fmap sf $ CaseSF <$>
+      specExpr t1 <*> traverse (traverse specExpr) branches
     LetCF sv t1 t2 -> case t1.coref of
       LamCF fix polyB argB env body
         | polyB /= [] -> do
@@ -264,8 +322,9 @@ specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
       let name = mangleLambda enclosingFun tyArgs i
       guardDecl name do
         let bodyCore' = typeSubInCore tyArgs bodyCore
+            argB' = typeSubInArgs tyArgs argB
         body <- specExpr bodyCore'
-        pure $ SpecFun env fix argB body
+        pure $ SpecFun env fix argB' body
       pure $ ClosureSF name env
 
 -- | Specialize a call to a top level function definition.
@@ -294,7 +353,9 @@ specFunDef name tyArgs = guardDecl mangledName do
       -- to capture environment variables.
       assert (env == M.empty) $
       let body' = typeSubInCore tyArgs body
-      in assert (length polyB == length tyArgs) (fix, argB, body')
+          argB' = typeSubInArgs tyArgs argB
+      in assert (length polyB == length tyArgs)
+        (fix, argB', body')
     _ -> (Nothing, [], fullCore)
 
 -- | Specialize a core module.

@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedRecordDot, DuplicateRecordFields, PatternSynonyms, BangPatterns #-}
 module Rll.Ast
   ( Span(..), Spans(..)
   , Var(..), TyVar(..), SVar(..), TyVarBinding(..)
@@ -11,9 +10,15 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Hashable (Hashable(..))
 import Prettyprinter
+import Data.Aeson (FromJSON, ToJSON, parseJSON, toJSON)
+import Data.Aeson qualified as A
+import Data.Aeson.Types qualified as AT
+import GHC.Generics (Generic)
+import Data.Vector qualified as V
 
 newtype Var = Var {name::Text}
-  deriving (Eq, Ord, Hashable)
+  deriving (Eq, Ord)
+  deriving newtype (Hashable, FromJSON, ToJSON)
 
 instance Show Var where
   show v = T.unpack v.name
@@ -22,6 +27,7 @@ instance Pretty Var where
   pretty (Var n) = pretty n
 
 data TyVar = MkTyVar {name::Text, index::Int}
+  deriving (Generic, FromJSON, ToJSON)
 
 instance Pretty TyVar where
   pretty (MkTyVar name index) = pretty name <> "@" <> pretty index
@@ -39,6 +45,8 @@ instance Hashable TyVar where
   hashWithSalt s (MkTyVar _ i) = hashWithSalt s i
 
 newtype TyVarBinding = TyVarBinding {name::Text}
+  deriving (Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 instance Show TyVarBinding where
   show b = show b.name
@@ -72,6 +80,19 @@ data Span = Span
   , endColumn :: !Int
   }
 
+-- TODO: custom from and to json stuff that just uses an array.
+instance FromJSON Span where
+  parseJSON = A.withArray "Span" \arr ->
+    let idx :: FromJSON a => Int -> AT.Parser a
+        idx i = case arr V.!? i of
+          Just v -> A.parseJSON v
+          Nothing -> fail $ "Expected value at index " <> show i
+    in Span <$> idx 0 <*> idx 1 <*> idx 2 <*> idx 3 <*> idx 4
+
+instance ToJSON Span where
+  toJSON (Span file sl sc el ec) =
+    A.Array $ V.fromList $ [A.toJSON file] <> fmap A.toJSON [sl, sc, el, ec]
+
 instance Show Span where
   show Span{..} = file <> " " <> p startLine startColumn <> "-" <> p endLine endColumn where
     p a b = show a <> ":" <> show b
@@ -80,6 +101,8 @@ instance Hashable Span where
   hashWithSalt s _ = hashWithSalt s (0::Int)
 
 data SVar = SVar {var::Var, span::Span}
+  deriving (Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 instance Show SVar where
   show v = show v.var
@@ -100,7 +123,8 @@ data Kind
   = TyKind
   | LtKind
   | TyOpKind Kind Kind
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 -- | Pretty print a kind.
 --
@@ -117,7 +141,8 @@ instance Pretty Kind where
 data Mult
   = Single
   | Many
-  deriving (Eq, Show)
+  deriving (Eq, Show, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 class Spans a where
   getSpan :: a -> Span
@@ -140,10 +165,24 @@ data TyF a
   | Univ Mult a TyVarBinding Kind a
   -- | Type application to type operators
   | TyApp a a
-  deriving (Eq, Functor, Foldable, Traversable)
+  deriving (Eq, Functor, Foldable, Traversable, Generic)
+
+instance FromJSON a => FromJSON (TyF a) where
+  parseJSON = A.genericParseJSON A.defaultOptions{A.sumEncoding=A.TwoElemArray}
+
+instance ToJSON a => ToJSON (TyF a) where
+  toJSON = A.genericToJSON A.defaultOptions{A.sumEncoding=A.TwoElemArray}
+  toEncoding = A.genericToEncoding A.defaultOptions{A.sumEncoding=A.TwoElemArray}
 
 data Ty = Ty { span :: Span, tyf :: (TyF Ty) }
   deriving (Eq)
+
+instance FromJSON Ty where
+  parseJSON v = Ty es <$> parseJSON v
+    where es = Span "" 1 1 1 1
+
+instance ToJSON Ty where
+  toJSON Ty{tyf} = toJSON tyf
 
 -- | Indicates when we need to add parentheses when pretty printing a type.
 data TyParenLevel
@@ -193,12 +232,14 @@ instance Spans Ty where
   getSpan = (.span)
 
 data CaseBranch a = CaseBranch SVar [SVar] a
-  deriving (Show, Eq, Functor, Foldable, Traversable)
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 data Literal
   = IntLit Integer
   | StringLit Text
-  deriving (Eq)
+  deriving (Eq, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 instance Show Literal where
   show (IntLit i) = show i

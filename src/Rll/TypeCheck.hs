@@ -1,4 +1,3 @@
-{-# LANGUAGE OverloadedStrings, OverloadedRecordDot, BlockArguments #-}
 module Rll.TypeCheck where
 
 import Rll.Ast
@@ -166,7 +165,7 @@ caseClause caseSpan t1 branches tcMethod = do
       dt <- lookupDataType tyName $ getSpan conTy
       case dt of
         EnumType _ tyParams conMap _ -> do
-          pure $ (tyName, M.map (applyTypeParams args tyParams) conMap)
+          pure $ (tyName, M.map (applyTypeParams args) conMap)
         _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
 
     -- | Type check a branch of the case expression.
@@ -194,7 +193,7 @@ getStructMembers ty termSpan = do
   dt <- lookupDataType name $ getSpan conTy
   case dt of
     StructType structCon' tyParams memberTys _ -> do
-      pure $ (structCon', name, applyTypeParams args tyParams memberTys)
+      pure $ (structCon', name, applyTypeParams args memberTys)
     _ -> throwError $ TypeIsNotStruct conTy termSpan
 
 letStructClause :: Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
@@ -252,15 +251,14 @@ verifyMult _ _ _ _ = pure ()
 -- | Checks to make sure borrows and drops are balanced in a function definition.
 --
 -- Any borrowing of a variable in startCtx needs to have same borrow count at the end.
-checkStableBorrowCounts :: Span -> [(Var,Span,Ty)] -> Ctx -> Ctx -> Tc ()
-checkStableBorrowCounts s addedVars c1 c2 =
+checkStableBorrowCounts :: Span -> Ctx -> Ctx -> Tc ()
+checkStableBorrowCounts s c1 c2 =
   unless ([] == unstableBorrowedVars) $ err
   where
-  argTys = (\(_,_,ty) -> ty) <$> addedVars
   movedVarTys = M.elems $ M.map snd $ M.difference c1.termVars c2.termVars
-  -- Arguments and moving variables into the context both increase the borrow counts.
+  -- moving variables into the context both increase the borrow counts.
   addedVarTys = movedVarTys
-  addedVarCounts = D.trace ("addedVarCounts " <> show m) $ m where
+  addedVarCounts = m where
     m = foldl' (M.unionWith (+)) M.empty $ f <$> addedVarTys
     f = M.fromList . fmap (,1) . ltSetToVars . ltsInTy c1
   -- compensated for the added variables
@@ -287,7 +285,7 @@ mkClosureSynth s body addVars act = do
   endCtx <- get
   let lts = Ty s $ LtJoin $ ltSetToTypes $ ltsForClosure startCtx endCtx body
       mult = findMult startCtx endCtx
-  checkStableBorrowCounts s addVars startCtx endCtx
+  checkStableBorrowCounts s startCtx endCtx
   endVarScopes $ (\(v,_,_) -> v) <$> addVars
   pure $ (lts, mult, out)
 
@@ -381,7 +379,7 @@ mkClosureCheck s body mult lts addVars m = do
   -- Check multiplicity if Many is specified
   verifyMult s mult startCtx endCtx
 
-  checkStableBorrowCounts s addVars startCtx endCtx
+  checkStableBorrowCounts s startCtx endCtx
 
   endVarScopes $ (\(v,_,_) -> v) <$> addVars
 
@@ -410,7 +408,6 @@ checkFunTm s mbFix polyB argB body ty = withFix mbFix $
       incRef fullTy
       let env = inferClosureEnv ctx1 ctx2 body
           tyArgs' = (\(_,_,b,k,_) -> (b,k)) <$> polyLayers
-      D.traceM $ "env " <> show env
       pure $ Core fullTy s $ LamCF mbFix tyArgs' args env bodyCore
       where
         foldLayer :: (Mult, Ty, TyVarBinding, Kind, Span)
@@ -568,11 +565,6 @@ check ty tm@Tm{span=s, tmf} = verifyCtxSubset s $ case tmf of
       else throwError $ ExpectedButInferred ty ty' $ getSpan tm
   where
     cf = pure . Core ty (getSpan tm)
-
--- TODO: write a helper function that will run the entire type check monad for this
--- and give me a context with the data types and new functions.
--- data CoreContext = CoreContext [DataType] [(Var, Core)]
--- generateCore :: [Decl] -> CoreContext
 
 -- | Type checks all declarations in the file and generates the Core IR
 -- for all of the functions.

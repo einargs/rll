@@ -2,8 +2,6 @@
 module Rll.TcSpecUtil
   ( txt, stdFile, synthTo, checkTo, rawTest, baseTest
   , baseFailTest, baseCtx
-  -- Utility constructors
-  , es, tyCon, refTy, tyVar, staticLt
   ) where
 
 import Test.Hspec
@@ -22,6 +20,7 @@ import Rll.TypeCheck
 import Rll.Ast
 import Rll.TypeError (prettyPrintError, TyErr(..))
 import Rll.Context
+import Rll.TcTools
 import Rll.TcMonad
 import Rll.Core
 
