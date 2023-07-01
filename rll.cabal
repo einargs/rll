@@ -176,6 +176,7 @@ test-suite rll-test
   other-modules:
       QuoteTxt
       Rll.AstUtil
+      Rll.GenSpec
       Rll.ParserSpec
       Rll.ScSpec
       Rll.ScSpecUtil

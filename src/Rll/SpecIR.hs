@@ -1,14 +1,14 @@
 module Rll.SpecIR
   ( SpecF(..), SpecIR(..), MVar
   , mangleDataType, mangleFun, mangleLambda
-  , mangleDataCon, mangleDataConFun, mvarToText
+  , mangleDataCon, mangleDataConFun, mangleFastFun
+  , mvarToText
   , SpecDataType(..)
   , SpecBuiltIn(..)
   , SpecDecl(..)
   ) where
 
 import Rll.Ast
-import Rll.Core (ClosureEnv)
 
 import Data.Hashable (Hashable(..))
 import Data.HashMap.Strict qualified as M
@@ -36,6 +36,12 @@ data SpecF a
   --
   -- The second argument is the name of the variable holding
   -- the recursive function reference and acts as an identifier.
+  --
+  -- For now we're not going to specifically optimize this
+  -- especially because of the situation where we'd need to
+  -- pass the context through other contexts, so we'll just
+  -- build a normal partially applied function value at the
+  -- start of a recursive function.
   | RecClosureSF MVar Var
   -- | Local variable.
   | VarSF Var
@@ -151,7 +157,7 @@ instance Pretty SpecDataType where
 -- to catch lambdas that need no context in the same transform we catch
 -- globals when eventually creating their actual invocable types.
 data SpecDecl
-  = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty)] SpecIR
+  = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty, Mult)] SpecIR
   | SpecDataType SpecDataType
   deriving (Show, Eq, Generic)
 
@@ -163,7 +169,7 @@ instance ToJSON SpecDecl where
   toEncoding = A.genericToEncoding A.defaultOptions{A.sumEncoding=A.TwoElemArray}
 
 instance Pretty SpecDecl where
-  pretty (SpecFun env fix args body) =
+  pretty (SpecFun env fix args _ body) =
     pretty env <> pfix <+> pargs <+> "=" <+> nest 2 (pretty body) where
     pfix = case fix of
       Just v -> " " <> parens ("fix" <+> pretty v)
@@ -219,6 +225,10 @@ mangleDataConFun (MVar (Var dtName) slug) (Var con) = MVar name slug
 
 mangleFun :: Var -> [Ty] -> MVar
 mangleFun v tys = MVar v $ mangleTypes tys
+
+-- | This is the fast version of the function.
+mangleFastFun :: MVar -> MVar
+mangleFastFun (MVar name slug) = MVar name (slug <> ".fast")
 
 mangleLambda :: MVar -> [Ty] -> Int -> MVar
 mangleLambda (MVar en slug) tys i = mangleFun (Var name) tys

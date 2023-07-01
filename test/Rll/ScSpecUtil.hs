@@ -2,6 +2,7 @@
 module Rll.ScSpecUtil
   ( txt
   , prepare
+  , parseFile
   , STestConfig(..)
   ) where
 

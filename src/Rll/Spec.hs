@@ -13,6 +13,8 @@ import Rll.SpecIR
 import Data.HashMap.Strict qualified as M
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
+import Control.Monad (void, forM_)
+import Data.Foldable (traverse_)
 import Data.List (foldl')
 import Control.Exception (assert)
 import Data.Text (Text)
@@ -26,7 +28,7 @@ import Prettyprinter
 data Lambda = PolyLambda
   { fix :: Maybe SVar
   , tyArgs :: [(TyVarBinding, Kind)]
-  , args :: [(SVar, Ty)]
+  , args :: [(SVar, Ty, Mult)]
   , env :: ClosureEnv
   , body :: Core
   }
@@ -62,6 +64,8 @@ data SpecErr
   | NoImmediateSpec Span
   -- | Cannot find the data type in `specDecls`.
   | NoSpecDataType MVar
+  -- | Cannot find the data type in `coreDataTypes`.
+  | NoCoreDataType Var
   deriving (Show, Eq)
 
 newtype Spec a = MkSpec { unSpec :: StateT SpecCtx (Except SpecErr) a }
@@ -79,6 +83,22 @@ getCoreFun name = do
   case M.lookup name coreFuns of
     Nothing -> throwError $ NoCoreFun name
     Just fun -> pure fun
+
+-- | Lookup the core data type and throw an error if not found.
+lookupCoreDataType :: Var -> Spec DataType
+lookupCoreDataType v = do
+  cdts <- gets (.coreDataTypes)
+  case M.lookup v cdts of
+    Nothing -> throwError $ NoCoreDataType v
+    Just cdt -> pure cdt
+
+-- | Utility function that takes the full type of a
+-- function and uses it to annotate the arguments.
+addMultToArgs :: Ty -> [(SVar, Ty)] -> [(SVar, Ty, Mult)]
+addMultToArgs (Ty _ (Univ _ _ _ _ out)) rs = addMultToArgs out rs
+addMultToArgs (Ty _ (FunTy m _ _ out)) ((sv, ty):rs) = (sv, ty, m):addMultToArgs out rs
+addMultToArgs _ [] = []
+addMultToArgs _ _ = error "function type should have been at least as long as the arg list"
 
 -- | Substitute type arguments into a `Core`.
 --
@@ -102,9 +122,9 @@ typeSubInCore tyCtx = go 0 where
     f = go xi
 
 -- | Substitute type arguments into the types of arguments.
-typeSubInArgs :: [Ty] -> [(SVar, Ty)] -> [(SVar, Ty)]
-typeSubInArgs subTys args = zip vars $ applyTypeParams subTys tys where
-  (vars, tys) = unzip args
+typeSubInArgs :: [Ty] -> [(SVar, Ty, Mult)] -> [(SVar, Ty, Mult)]
+typeSubInArgs subTys args = zip3 vars (applyTypeParams subTys tys) mults where
+  (vars, tys, mults) = unzip3 args
 
 -- | Utility function that checks if a declaration already
 -- has been created. If it hasn't, it builds and registers
@@ -127,15 +147,26 @@ lookupLocalFun v = M.lookup v <$> gets (.localFuns)
 --
 -- Only does so once.
 specDataType :: DataType -> [Ty] -> Spec MVar
-specDataType dt tyArgs = guardDecl name $ pure specDt
+specDataType dt tyArgs = guardDecl name $ SpecDataType <$> specDt
   where
   name = mangleDataType (getDataTypeName dt) tyArgs
-  specDt = SpecDataType $ case dt of
-    EnumType name tyParams cases _ -> SpecEnum $
-      applyTypeParams tyArgs <$> cases
-    StructType con tyParams fields _ -> SpecStruct con $
-      applyTypeParams tyArgs fields
-    BuiltInType enum -> SpecBuiltIn $ case enum of
+  specTy :: Ty -> Spec ()
+  specTy ty = case parseTyCon ty of
+    Nothing -> pure ()
+    Just (v, args) -> do
+      cdt <- lookupCoreDataType v
+      void $ specDataType cdt args
+  specDt = case dt of
+    -- TODO: loop over the member types and specialize them too.
+    EnumType name tyParams cases _ -> do
+      let cases' = applyTypeParams tyArgs <$> cases
+      forM_ cases' $ traverse_ specTy
+      pure $ SpecEnum cases'
+    StructType con tyParams fields _ -> do
+      let args' = applyTypeParams tyArgs fields
+      forM_ args' specTy
+      pure $ SpecStruct con args'
+    BuiltInType enum -> pure $ SpecBuiltIn $ case enum of
       BuiltInI64 -> assert (tyArgs == []) $ SpecI64
       BuiltInString -> assert (tyArgs == []) $ SpecString
 
@@ -170,7 +201,8 @@ genDataConFun dtVar conVar rawDT tyArgs = do
           SpecBuiltIn _ -> error "temp: neither I64 or string has a constructor"
         mkName i = Var $ "arg" <> T.pack (show i)
         argVars = mkName <$> [0..length argTys]
-        funArgs = zipWith (\v ty -> (SVar v ty.span, ty)) argVars argTys
+        mults = Many:repeat Single
+        funArgs = zipWith3 (\v ty m -> (SVar v ty.span, ty, m)) argVars argTys mults
         argExprs = zipWith (\v ty -> (SpecIR ty dtSpan $ VarSF v)) argVars argTys
         f :: Ty -> Ty -> Ty
         f base arg = Ty dtSpan $ TyApp base arg
@@ -245,11 +277,13 @@ specExpr core@Core{span, coref} = do
     LetCF sv t1 t2 -> case t1.coref of
       LamCF fix polyB argB env body
         | polyB /= [] -> do
-            let poly = PolyLambda fix polyB argB env body
+            let argB' = addMultToArgs core.ty argB
+                poly = PolyLambda fix polyB argB' env body
             withPolyLambda sv.var poly $ specExpr t2
       _ -> fmap sf $ LetSF sv <$> specExpr t1 <*> specExpr t2
     LamCF fix [] argB env body -> do
-      mvar <- storeLambda fix argB env body
+      let argB' = addMultToArgs core.ty argB
+      mvar <- storeLambda fix argB' env body
       pure $ sf $ ClosureSF mvar env
     LamCF _ polyB _ _ _ -> error "Should be caught by MustSpec at start"
   where sf = SpecIR core.ty core.span
@@ -268,7 +302,7 @@ addSpecDecl mvar sd = modify' \ctx ->
   ctx{specDecls=M.insert mvar sd ctx.specDecls}
 
 -- | Store a non-polymorphic lambda in `specDecls`.
-storeLambda :: Maybe SVar -> [(SVar, Ty)] -> ClosureEnv -> Core -> Spec MVar
+storeLambda :: Maybe SVar -> [(SVar, Ty, Mult)] -> ClosureEnv -> Core -> Spec MVar
 storeLambda fix args env body = do
   name <- freshLambdaName []
   let wrap = case fix of
@@ -346,16 +380,17 @@ specFunDef name tyArgs = guardDecl mangledName do
   pure $ SpecFun (ClosureEnv M.empty) fix args body
   where
   mangledName = mangleFun name tyArgs
-  getBody :: Core -> (Maybe SVar, [(SVar, Ty)], Core)
+  getBody :: Core -> (Maybe SVar, [(SVar, Ty, Mult)], Core)
   getBody fullCore@Core{coref} = case coref of
     LamCF fix polyB argB (ClosureEnv env) body ->
       -- Top level Function definitions should never be able
       -- to capture environment variables.
       assert (env == M.empty) $
       let body' = typeSubInCore tyArgs body
-          argB' = typeSubInArgs tyArgs argB
+          argB' = addMultToArgs fullCore.ty argB
+          args = typeSubInArgs tyArgs argB'
       in assert (length polyB == length tyArgs)
-        (fix, argB', body')
+        (fix, args, body')
     _ -> (Nothing, [], fullCore)
 
 -- | Specialize a core module.

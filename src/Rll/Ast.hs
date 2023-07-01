@@ -4,11 +4,14 @@ module Rll.Ast
   , EnumCon(..), TypeParam(..), Decl(..)
   , Kind(..), Mult(..), Ty(..), TyF(..)
   , Tm(..), TmF(..), CaseBranch(..), Literal(..)
+  , parseTyCon
+  , ClosureUse(..), ClosureEnv(..)
   ) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Hashable (Hashable(..))
+import Data.HashMap.Strict qualified as M
 import Prettyprinter
 import Data.Aeson (FromJSON, ToJSON, parseJSON, toJSON)
 import Data.Aeson qualified as A
@@ -222,6 +225,17 @@ basePrettyTy parenLevel ty@Ty{tyf} = case tyf of
     parenFor lvl | lvl <= parenLevel = parens
                  | otherwise = id
 
+-- | If the type is a type constructor followed by type applications,
+-- return that; otherwise return nothing.
+parseTyCon :: Ty -> Maybe (Var, [Ty])
+parseTyCon ty = collectApps [] ty where
+  collectApps :: [Ty] -> Ty -> Maybe (Var, [Ty])
+  collectApps rs ty = case ty.tyf of
+    TyApp b a -> collectApps (a:rs) b
+    TyCon v -> Just (v, reverse rs)
+    _ -> Nothing
+
+
 instance Pretty Ty where
   pretty = basePrettyTy NoTyParen
 
@@ -245,6 +259,7 @@ instance Show Literal where
   show (IntLit i) = show i
   show (StringLit txt) = show txt
 
+-- | Internal structure of a term.
 data TmF a
   = Case a [CaseBranch a]
   | LetStruct SVar [SVar] a a
@@ -261,6 +276,7 @@ data TmF a
   | LiteralTm Literal
   deriving (Show, Eq, Functor, Foldable, Traversable)
 
+-- | Common elements of a term.
 data Tm = Tm {span :: Span, tmf :: TmF Tm }
   deriving (Eq)
 
@@ -270,3 +286,32 @@ instance Show Tm where
 instance Spans Tm where
   getSpan = (.span)
 
+-- | A marker type for how free variables in a closure
+-- are used.
+data ClosureUse a
+  = Moved a
+  | Refd a
+  | Copied a
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+  deriving anyclass (FromJSON, ToJSON)
+
+-- | The free variables mentioned inside a closure.
+newtype ClosureEnv = ClosureEnv
+  { envMap :: M.HashMap Var (ClosureUse Ty)
+  }
+  deriving (Eq, Show)
+
+instance FromJSON ClosureEnv where
+  parseJSON = fmap (ClosureEnv . M.fromList) . parseJSON
+
+instance ToJSON ClosureEnv where
+  toJSON (ClosureEnv m) = toJSON $ M.toList m
+
+instance Pretty ClosureEnv where
+  pretty (ClosureEnv m)
+    | m == M.empty = "{}"
+    | otherwise = "{" <+> align (vsep mems) <+> "}" where
+      mems = punctuate "," $ toMem <$> M.toList m
+      toMem (v, Moved ty) = "moved" <+> pretty v <+> "=" <+> pretty ty
+      toMem (v, Refd ty) = "refd" <+> pretty v <+> "=" <+> pretty ty
+      toMem (v, Copied ty) = "copied" <+> pretty v <+> "=" <+> pretty ty
