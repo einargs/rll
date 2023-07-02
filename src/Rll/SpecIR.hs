@@ -2,6 +2,7 @@ module Rll.SpecIR
   ( SpecF(..), SpecIR(..), MVar
   , mangleDataType, mangleFun, mangleLambda
   , mangleDataCon, mangleDataConFun, mangleFastFun
+  , mangleEntryFun
   , mvarToText
   , SpecDataType(..)
   , SpecBuiltIn(..)
@@ -169,13 +170,13 @@ instance ToJSON SpecDecl where
   toEncoding = A.genericToEncoding A.defaultOptions{A.sumEncoding=A.TwoElemArray}
 
 instance Pretty SpecDecl where
-  pretty (SpecFun env fix args _ body) =
+  pretty (SpecFun env fix args body) =
     pretty env <> pfix <+> pargs <+> "=" <+> nest 2 (pretty body) where
     pfix = case fix of
       Just v -> " " <> parens ("fix" <+> pretty v)
       Nothing -> mempty
     pargs = fillSep $ parg <$> args
-    parg (v, ty) = parens $ pretty v <+> ":" <+> pretty ty
+    parg (v, ty, _) = parens $ pretty v <+> ":" <+> pretty ty
   pretty (SpecDataType dt) = pretty dt
 
 -- | A mangled variable name.
@@ -226,9 +227,17 @@ mangleDataConFun (MVar (Var dtName) slug) (Var con) = MVar name slug
 mangleFun :: Var -> [Ty] -> MVar
 mangleFun v tys = MVar v $ mangleTypes tys
 
+-- | Utility for creating mangled versions of functions.
+mangleFunVer :: Text -> MVar -> MVar
+mangleFunVer ver (MVar name slug) = MVar name $ T.concat [slug, ".", ver]
+
 -- | This is the fast version of the function.
 mangleFastFun :: MVar -> MVar
-mangleFastFun (MVar name slug) = MVar name (slug <> ".fast")
+mangleFastFun = mangleFunVer "fast"
+
+-- | This is the entry function.
+mangleEntryFun :: MVar -> MVar
+mangleEntryFun = mangleFunVer "entry"
 
 mangleLambda :: MVar -> [Ty] -> Int -> MVar
 mangleLambda (MVar en slug) tys i = mangleFun (Var name) tys

@@ -84,24 +84,26 @@ Spec tests
   function types. That would make some of my functions nicer.
 
 ## LLVM
-- [X] Get `llvm-hs-pure` installed. I may need to downgrade my stackage version.
-  - Currently it conflicts with bytestring `0.11.3` which my current resolver
-    uses.
-  - The latest stackage resolver with `llvm-hs-pure` in it is `lts-19.33`.
-  - I might use an older resolver and then force it to use a GHC version that
-    has my lovely overloaded-record-dots.
-- [X] Install LLVM.
-- [X] Write out a compile monad for turning Elab into LLVM.
-- [X] Transform RLL structures into LLVM structures.
-- [X] Transform RLL enums into LLVM structures.
 - [ ] I'll need to have some way of inserting drops when we consume a multi-use
   function while calling it.
   - I might need to add some extra info to `SpecIR` for that.
   - But the drops for consumed multi-use functions can happen after a generated
     call.
-- [ ] Start compiling functions.
-- [ ] Implement strings.
-  - Actually this probably going to need string refs as well that can make a distinction between things.
+- [ ] Inside the generated IR I should drop closures when they're consumed instead of relying
+  on the entry function to do it if necessary.
+- [ ] Look into whether I can just leave `load` and `alloca` instructions with the `align` arg
+  as `1` or if I need to pass the data layout around and read from that. I think that it'll
+  automatically promote the alignment based on the stack alignment.
+- [ ] Write a nice helper for building manual functions. Defining all the entry function args
+  separate in `genFun` is annoying.
+- [ ] Instead of saturated and unsaturated entry functions, what I'll do is have the entry
+  function take a stack allocated pointer that I'll write the return value to.
+- I could write an llvm function that calls the entry function with the correct number of args
+  on the stack based on a number in the closure ptr that says how many it can still accept.
+  The entry function would return a raw union of a function value and the return type that this
+  function would know how to interpret and cast based on info. Then it would loop over that
+  part until it had called everything.
+  - I think this is basically the worst parts of eval/apply and push/enter.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -135,6 +137,9 @@ When we implement traits, I think that `Spec` will be where we elaborate all of 
 - [ ] Implement uncurrying.
   - In `Spec` if I find situations of `let f = ClosureCall f in ...` then I can propagate that `f` out
     to later usages of it. That will help me immediately invoke the function. (This is part of uncurrying.)
+- [ ] LLVM has lifetime intrinsic stuff: https://llvm.org/docs/LangRef.html#int-lifestart
+- [ ] Implement strings.
+  - Actually this probably going to need string refs as well that can make a distinction between things.
 
 ## Calling Methods
 ### New
@@ -143,6 +148,8 @@ When we implement traits, I think that `Spec` will be where we elaborate all of 
 - Function value is the closure pointer and function pointer.
 - When we call something, we `alloca` a struct with all of the arguments on the stack.
 - If we have more arguments than we need, we find the start of the next few arguments.
+
+- Maybe I should look into eval/apply and caching stuff.
 
 - [ ] Problem: how do I make the return type of the slow function consistent? It needs to
   return both fun values for if the arguments are insufficient and the return type if
