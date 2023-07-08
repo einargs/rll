@@ -3,6 +3,7 @@ module Rll.ScSpecUtil
   ( txt
   , prepare
   , parseFile
+  , clearTestData
   , STestConfig(..)
   ) where
 
@@ -15,7 +16,6 @@ import Rll.TcMonad
 import Rll.Spec
 import Rll.SpecIR
 import Rll.Context
-import Rll.Core (ClosureEnv(..))
 import Rll.Ast
 
 import Data.IORef (newIORef, modifyIORef, readIORef)
@@ -58,7 +58,7 @@ hasTypeVariables :: HM.HashMap MVar SpecDecl -> Bool
 hasTypeVariables = any checkDecl where
   checkDecl decl = case decl of
     SpecFun (ClosureEnv cenv) _ args ir -> any (any checkTy) cenv
-      || any (checkTy . snd) args || checkIR ir
+      || any (\(_,ty,_) -> checkTy ty) args || checkIR ir
     SpecDataType dt -> case dt of
       SpecEnum m -> any (any checkTy) m
       SpecStruct _ ls -> any checkTy ls
@@ -68,11 +68,16 @@ hasTypeVariables = any checkDecl where
     TyVar _ -> True
     _ -> any checkTy tyf
 
-prepare :: HasCallStack => IO (STestConfig -> Text -> Text -> Expectation, IO ())
-prepare = do
-  let locFile = $currentFilePath
-      testDataFile = takeDirectory locFile </> "spec-tests.json"
-  testDataRaw <- eitherDecodeFileStrict' testDataFile
+testDataFilePath :: FilePath
+testDataFilePath = takeDirectory locFile </> "spec-tests.json"
+  where locFile = $currentFilePath
+
+clearTestData :: IO ()
+clearTestData = TIO.writeFile testDataFilePath "{}"
+
+prepare :: HasCallStack => Maybe STestConfig -> IO (STestConfig -> Text -> Text -> Expectation, IO ())
+prepare mbGlobalConfig = do
+  testDataRaw <- eitherDecodeFileStrict' testDataFilePath
   (testData :: M.Map Text (HM.HashMap MVar SpecDecl)) <-
     case testDataRaw of
       Left msg -> fail $ "JSON parsing error: " <> msg
@@ -83,7 +88,10 @@ prepare = do
   testDataRef <- newIORef testData
 
   let mkTest :: HasCallStack => STestConfig -> Text -> Text -> Expectation
-      mkTest cfg testName rllFile = do
+      mkTest testCfg testName rllFile = do
+        let cfg = case mbGlobalConfig of
+              Nothing -> testCfg
+              Just globalConfig -> globalConfig
         mbDeclMap <- parseFile rllFile
         case mbDeclMap of
           Nothing -> pure ()
@@ -105,5 +113,5 @@ prepare = do
       commit :: IO ()
       commit = do
         updatedTestData <- readIORef testDataRef
-        encodeFile testDataFile updatedTestData
+        encodeFile testDataFilePath updatedTestData
   pure (mkTest, commit)

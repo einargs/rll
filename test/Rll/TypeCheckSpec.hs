@@ -1264,3 +1264,25 @@ spec = parallel do
         drop r1 in drop r2 in drop r3 in
         let Unit = u3 in u1;
         |]
+
+    it "throws an error for shadowed variables" do
+      baseFailTest (VarAlreadyInScope (Var "u") es es) [txt|
+        test : Unit
+        = let u = Unit in
+        let f = \(v:Unit) ->
+          let u = Unit in
+          let Unit = v in u
+        in f u;
+        |]
+      baseFailTest (VarAlreadyInScope (Var "u") es es) [txt|
+        test : Unit
+        = let u = Unit in
+        let f = \(u:Unit) -> u in
+        f u;
+        |]
+      baseFailTest (VarAlreadyInScope (Var "u") es es) [txt|
+        test : Unit
+        = let u = Unit in
+        let u = Unit in
+        let Unit = u in u;
+        |]

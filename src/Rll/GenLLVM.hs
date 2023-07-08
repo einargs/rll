@@ -16,11 +16,15 @@ import Control.Monad.IO.Class (MonadIO(..))
 import Data.Word
 import Data.Map qualified as Map
 import Data.HashMap.Strict qualified as M
-import Control.Monad (void, forM_, forM)
+import Control.Monad (void, forM_, forM, when)
 import Data.Foldable (traverse_, foldlM)
 import Data.Functor (($>), (<&>))
+import Data.List (zip4)
 import GHC.Stack (HasCallStack)
 import Debug.Trace qualified as D
+import Control.Exception (assert)
+import Data.Maybe (fromMaybe)
+import Data.String (fromString)
 
 import LLVM.Internal.FFI.DataLayout (getTypeAllocSize)
 import LLVM.Internal.DataLayout (withFFIDataLayout)
@@ -47,7 +51,9 @@ import LLVM.AST.Type qualified as A
 
 -- | Information about how to build the closure object.
 data ClosureInfo = ClosureInfo
-  { returnType :: A.Type
+  -- | Note that this will use the function variables in `ClosureEnv`
+  -- to pull in the free variables.
+  { funValueBuilder :: BuildIR A.Operand
   }
 
 data GenCtx = GenCtx
@@ -91,6 +97,7 @@ closureInfoFor var = do
   case M.lookup var m of
     Just i -> pure i
     Nothing -> do
+      error "following the order the decls were generated in should make this unneeded"
       sd <- gets (.specDecls)
       case M.lookup var sd of
         Just (SpecFun cenv mbFix params body) ->
@@ -152,12 +159,10 @@ getTypeSize ty = do
     -- what I want. Still weird.
     getTypeAllocSize dlPtr tyPtr
 
--- | Since all of our types will eventually be generated, we can just
--- refer to them.
-mvarForTy :: Ty -> Gen MVar
-mvarForTy ty = case parseTyCon ty of
-  Nothing -> throwError $ NotTyCon ty
-  Just (v, tys) -> pure $ mangleDataType v.name tys
+-- | Generate an `MVar` for a data type.
+mvarForDataTy :: Ty -> Maybe MVar
+mvarForDataTy ty = f <$> parseTyCon ty where
+  f (v, tys) = mangleDataType v.name tys
 
 -- | Version of `AT.typeOf` that just immediately throws the error.
 typeOf :: (HasCallStack, AT.Typed a) => a -> BuildIR A.Type
@@ -177,6 +182,12 @@ getClosurePtr op = IR.extractValue op [0]
 -- | Get the entry function pointer from the function value.
 getEntryFunPtr :: A.Operand -> BuildIR A.Operand
 getEntryFunPtr op = IR.extractValue op [1]
+
+-- | Free the closure pointer in a function value.
+freeClosurePtrIn :: A.Operand -> BuildIR ()
+freeClosurePtrIn funVal = do
+  closurePtr <- getClosurePtr funVal
+  freePtr closurePtr
 
 -- | This is the type for an entry function.
 --
@@ -208,10 +219,23 @@ buildFunValueFor funMVar closurePtr = do
   let entryFun = refGlobalFun $ mangleEntryFun funMVar
   buildStructIR [closurePtr, entryFun]
 
+-- | Create the closure pointer, load free variables into a context
+-- arg and store it there, and then build the function value.
+prepareFunValue :: MVar -> ClosureEnv -> A.Type -> BuildIR A.Operand
+prepareFunValue funMVar cenv cenvTy = do
+  contextVal <- createClosureEnv cenv cenvTy `named` "context"
+  closurePtr <- mallocType cenvTy `named` "closurePtr"
+  IR.store closurePtr 1 contextVal
+  buildFunValueFor funMVar closurePtr
+
+-- TODO: documentation
 toLlvmType :: Ty -> Gen A.Type
-toLlvmType (Ty _ (FunTy _ _ _ _)) = pure funValueType
+toLlvmType Ty{tyf=FunTy _ _ _ _} = pure funValueType
+toLlvmType Ty{tyf=RefTy _ _} = pure A.ptr
 toLlvmType ty = do
-  mvar <- mvarForTy ty
+  mvar <- case mvarForDataTy ty of
+    Just mvar -> pure mvar
+    Nothing -> throwError $ NotTyCon ty
   let name = mvarToName mvar
   typeDefs <- gets (.moduleState.builderTypeDefs)
   case Map.lookup name typeDefs of
@@ -219,6 +243,20 @@ toLlvmType ty = do
     Nothing -> do
       sdt <- lookupSpecDataType mvar
       genType mvar sdt
+
+-- | Normally when we convert a type to an LLVM type,
+-- we avoid using any opaque named types. This helps
+-- us when calculating the sizes of types for enums.
+--
+-- However, inside the IR generation we can't access
+-- that code because it needs the full `Gen` monad.
+-- So instead we use an opaque type.
+opaqueTypeFor :: Ty -> A.Type
+opaqueTypeFor Ty{tyf=FunTy _ _ _ _} = funValueType
+opaqueTypeFor Ty{tyf=RefTy _ _} = A.ptr
+opaqueTypeFor ty = case mvarForDataTy ty of
+  Nothing -> error "shouldn't be possible"
+  Just mvar -> A.NamedTypeReference $ mvarToName $ mvar
 
 -- | Emits an llvm type definition into the module.
 --
@@ -284,10 +322,18 @@ addNamedInstr name instr = IR.modifyBlock \bb -> bb
 extractClosureEnv :: ClosureEnv -> A.Operand -> BuildIR ()
 extractClosureEnv cenv value = do
   t <- typeOf value
-  forM_ vars \(i,n) ->
+  varNames <- traverse introVarName $ M.keys cenv.envMap
+  forM_ (zip [0..] varNames) \(i,n) ->
     addNamedInstr n $ A.ExtractValue value [i] []
+
+-- | Load all of the variables from the environment and store
+-- them in the closure structure.
+createClosureEnv :: ClosureEnv -> A.Type -> BuildIR A.Operand
+createClosureEnv cenv cenvTy = do
+  buildStructIR $ zipWith A.LocalReference types vars
   where
-  vars = zip [0..] $ varToName <$> M.keys cenv.envMap
+  types = getStructFields cenvTy
+  vars = varToName <$> M.keys cenv.envMap
 
 -- | Build a structure with the given llvm types as fields
 -- in addition to the initial argument counter.
@@ -326,8 +372,8 @@ runBuildIR act = state \genCtx ->
 
 -- | Generate a call to the given function value using the given
 -- stack argument pointer.
-genCallWithArgPtr :: A.Operand -> A.Operand -> A.Operand -> A.Operand -> BuildIR A.Operand
-genCallWithArgPtr funValue returnPtr argCount argPtr = do
+callWithArgPtr :: A.Operand -> A.Operand -> A.Operand -> A.Operand -> BuildIR A.Operand
+callWithArgPtr funValue returnPtr argCount argPtr = do
   closurePtr <- getClosurePtr funValue
   funPtr <- getEntryFunPtr funValue
   let args = (,[]) <$> [closurePtr, argPtr, argCount, returnPtr]
@@ -340,14 +386,34 @@ genCallWithArgPtr funValue returnPtr argCount argPtr = do
 -- all possible arguments.
 --
 -- `retTy` is the expected type after all of the arguments have been applied.
-genCall :: A.Type -> A.Operand -> [A.Operand] -> BuildIR A.Operand
-genCall retTy funValue argOps = do
+funValCall :: A.Type -> A.Operand -> [A.Operand] -> BuildIR A.Operand
+funValCall retTy funValue argOps = do
   returnPtr <- IR.alloca retTy Nothing 1 `named` "returnPtr"
   argStruct <- buildStructIR argOps `named` "argStruct"
   argStructTy <- typeOf argStruct
   argPtr <- IR.alloca argStructTy Nothing 1 `named` "argPtr"
   let argCount = IR.int32 $ toInteger $ length argOps
-  genCallWithArgPtr returnPtr funValue argCount argPtr
+  callWithArgPtr returnPtr funValue argCount argPtr
+
+-- | Generate a call to a statically known function.
+knownCall :: MVar -> A.Operand -> [A.Operand] -> BuildIR A.Operand
+knownCall funMVar cenvOp argOps = do
+  let funName = mvarToName $ mangleFastFun funMVar
+      funRef = A.ConstantOperand $ A.GlobalReference funName
+      args = cenvOp:argOps
+  funType <- typeOf funRef
+  let numPassedArgs = length args
+      (retTy, numReqArgs) = case funType of
+        A.FunctionType retTy argTys isVarArg -> (retTy, length argTys)
+        _ -> error "should always be a function type"
+  if numPassedArgs < numReqArgs
+    then buildClosurePtr args
+    else do
+      let (needed, extra) = splitAt numReqArgs args
+      result <- IR.call funType funRef $ (,[]) <$> needed
+      case extra of
+        [] -> pure result
+        _ -> funValCall retTy result extra
 
 -- | Use `GEP` to index into a field of a struct in a pointer.
 indexStructPtr :: A.Type -> A.Operand -> Integer -> BuildIR A.Operand
@@ -371,11 +437,48 @@ getStructFields _ = error "was not a struct type"
 -- | This functions the same as `closureAndStackFor`, it just only
 -- gives the structure of the closure.
 closureTyFor :: [A.Type] -> Integer -> A.Type
-closureTyFor args i = A.StructureType False $ take (fromInteger i) args
+closureTyFor args i = mkClosureType $ take (fromInteger i) args
+
+-- | Copy struct members from one struct to another.
+copyMembersToFrom :: A.Type -> A.Operand -> Integer -> A.Type -> A.Operand -> Integer -> BuildIR ()
+copyMembersToFrom toTy toPtr firstToIdx fromTy fromPtr firstFromIdx = do
+  let fromFields = drop (fromInteger firstFromIdx) $ getStructFields fromTy
+      toFields = drop (fromInteger firstToIdx) $ getStructFields toTy
+      fields = zip4 [firstFromIdx..] fromFields [firstToIdx..] toFields
+  forM_ fields \(fromIdx, argTy, toIdx, toTy) -> do
+    assert (argTy == toTy) $ pure ()
+    fromArgPtr <- indexStructPtr fromTy fromPtr fromIdx `named` "fromArgPtr"
+    toArgPtr <- indexStructPtr toTy toPtr toIdx `named` "toArgPtr"
+    arg <- IR.load argTy fromArgPtr 1 `named` "arg"
+    IR.store toArgPtr 1 arg
+
+-- | Load members of a struct pointed to starting from a given index.
+loadMembersFrom :: Integer -> A.Type -> A.Operand -> BuildIR [A.Operand]
+loadMembersFrom startIdx fromTy fromPtr = do
+  let fields = drop (fromInteger startIdx) $ getStructFields fromTy
+  forM (zip [startIdx..] fields) \(idx, argTy) -> do
+    fromArgPtr <- indexStructPtr fromTy fromPtr idx `named` "fromArgPtr"
+    arg <- IR.load argTy fromArgPtr 1 `named` "arg"
+    pure arg
+
+-- | Build a closure pointer that holds the given arguments.
+--
+-- Note that the closure environment should be one of the arguments.
+buildClosurePtr :: [A.Operand] -> BuildIR A.Operand
+buildClosurePtr heldArgs = do
+  argTys <- traverse typeOf heldArgs
+  let closureTy = mkClosureType argTys
+      size = IR.int32 $ toInteger $ length heldArgs
+  newPtr <- mallocType closureTy
+  IR.store newPtr 1 size
+  forM_ (zip heldArgs [1..]) \(arg, idx) -> do
+    argPtr <- indexStructPtr closureTy newPtr idx
+    IR.store argPtr 1 arg
+  pure newPtr
 
 -- | Generate the entry function for a function.
-genEntryFun :: MVar -> Ty -> A.Type -> [A.Type] -> [Mult] -> Gen ()
-genEntryFun funMVar fullReturnTy fastRetTy llvmArgs mults = do
+genEntryFun :: MVar -> Ty -> A.Type -> [A.Type] -> Gen ()
+genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
   (_, entryBlocks) <- runBuildIR mdo
     -- this is the number of already applied arguments stored in our
     -- closure.
@@ -389,14 +492,6 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs mults = do
     -- even if that context argument is a zero width type.
     jumps <- forM [1..(arity-1)] \i -> mdo
       let argsLeft = arity - i
-          -- The multiplicity of the closure pointer.
-          closureMult = mults !! (fromInteger i-1)
-          -- | Clean up the old closure pointer if necessary.
-          handleOldClosure = case closureMult of
-            -- If the closure is single use, we clean up the pointer.
-            Single -> freePtr oldClosurePtr
-            -- If it's multi-use, it'll be cleaned up when we drop it.
-            Many -> pure ()
       label <- IR.block `named` "closureArg"
 
       -- NOTE: Do I need to use a `phi` to grab `closureArgCount`?
@@ -409,46 +504,27 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs mults = do
         -- to reduce code size? Not sure how I'd handle allocating the new thing though.
         let (oldClosureTy, stackArgsTy) = closureAndStackFor llvmArgs i numArgsOnStack
             newClosureTy = closureTyFor llvmArgs (i+numArgsOnStack)
-            stackArgConstant = IR.int32 numArgsOnStack
         label <- IR.block `named` "stackArg"
 
-        -- Store the updated number of arguments in the closure.
-        newClosurePtr <- mallocType newClosureTy
-        newClosureArgCount <- IR.add closureArgCount stackArgConstant `named` "newClosureArgCount"
-        IR.store newClosurePtr 1 newClosureArgCount
+        -- Load arguments from our old closure type.
+        oldClosureArgs <- loadMembersFrom 1 oldClosureTy oldClosurePtr
+        extraStackArgs <- loadMembersFrom 0 stackArgsTy stackArgs
+        let newClosureArgs = oldClosureArgs <> extraStackArgs
 
-        let copyArgsFromTo :: Integer -> A.Type -> A.Operand -> Integer -> BuildIR ()
-            copyArgsFromTo firstFromIdx fromTy fromPtr firstToIdx = do
-              let fromFields = drop (fromInteger firstFromIdx) $ getStructFields fromTy
-                  fields = zip3 [firstFromIdx..] fromFields [firstToIdx..]
-              forM_ fields \(fromIdx, argTy, toIdx) -> do
-                fromArgPtr <- indexStructPtr fromTy fromPtr fromIdx `named` "fromArgPtr"
-                toArgPtr <- indexStructPtr newClosureTy newClosurePtr toIdx `named` "toArgPtr"
-                arg <- IR.load argTy fromArgPtr 1 `named` "arg"
-                IR.store toArgPtr 1 arg
-        copyArgsFromTo 1 oldClosureTy oldClosurePtr 1 -- [0..i-1]
-        copyArgsFromTo 0 stackArgsTy stackArgs i -- [i..i+numArgsOnStack-1]
-        handleOldClosure
+        newClosurePtr <- buildClosurePtr newClosureArgs `named` "newClosurePtr"
+
         newFunValue <- buildFunValueFor funMVar newClosurePtr `named` "newFunValue"
         returnOp newFunValue
         pure (A.Int 32 numArgsOnStack, label)
       -- 2. If there are enough args, we call the fast function.
       makeCall <- IR.block `named` "makeCall"
       let (oldClosureTy, stackArgsTy) = closureAndStackFor llvmArgs i argsLeft
-          -- | Utility for loading the arguments from memory.
-          loadArgsFrom :: Integer -> A.Type -> A.Operand -> BuildIR [(A.Operand, [A.ParameterAttribute])]
-          loadArgsFrom startIdx fromTy fromPtr = do
-            let fields = drop (fromInteger startIdx) $ getStructFields fromTy
-            forM (zip [startIdx..] fields) \(idx, argTy) -> do
-              fromArgPtr <- indexStructPtr fromTy fromPtr idx `named` "fromArgPtr"
-              arg <- IR.load argTy fromArgPtr 1 `named` "arg"
-              pure (arg, [])
+          loadArgsFrom i t o = fmap (fmap (,[])) $ loadMembersFrom i t o
       loadedClosureArgs <- loadArgsFrom 1 oldClosureTy oldClosurePtr
       loadedStackArgs <- loadArgsFrom 0 stackArgsTy stackArgs
+      let fastArgs = loadedClosureArgs <> loadedStackArgs
       -- call the fast function with the loaded arguments
-      result <- IR.call fastFunTy fastFunRef $ loadedClosureArgs <> loadedStackArgs
-                `named` "result"
-      handleOldClosure
+      result <- IR.call fastFunTy fastFunRef fastArgs `named` "result"
 
       -- 3. We check the return type to see if we need to generate
       -- code for handling extra arguments.
@@ -469,24 +545,23 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs mults = do
           -- we use GEP to calculate the right offset and then
           -- generate the calling code with the remaining arguments
           -- and offset stack pointer.
-          restStackArgs <- IR.gep stackArgsTy stackArgs [IR.int32 1] `named` "restStackArgs"
-          restStackArgCount <- IR.sub 
-          genCallWithArgPtr result returnPtr nextStackArgs
-          -- check if the next closure would be single or multi-use.
-          case mult of
-            -- If it's multi-use we then free it ourselves since there's no
-            -- drop to free it.
-            Many -> do
-              secondClosure <- getClosurePtr result
-              freePtr secondClosure
-            Single -> pure ()
-          IR.retVoid
+          restArgsPtr <- IR.gep stackArgsTy stackArgs [IR.int32 1] `named` "restArgsPtr"
+          let argsLeftOp = IR.int32 $ argsLeft
+          restArgsCount <- IR.sub stackArgCount argsLeftOp `named` "restArgCount"
+          -- We call the returned function value and get the result.
+          secondResult <- callWithArgPtr result returnPtr restArgsCount restArgsPtr
+          -- Then since we're never returning the function value in result, we
+          -- have to free the closure pointer.
+          freeClosurePtrIn result
+
+          returnOp secondResult
+
         -- b. If the return type is not a function, we know that we can
         -- always return the result.
         _ -> returnOp result
       pure $ (A.Int 32 $ fromInteger i, label)
     pure ()
-  emitDefn $ baseFunctionDefaults
+  emitDefn $ A.GlobalDefinition $ baseFunctionDefaults
     { AG.name = mvarToName $ mangleEntryFun funMVar
     , AG.parameters =
       ([ A.Parameter A.ptr "oldClosurePtr" []
@@ -514,9 +589,66 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs mults = do
     IR.store returnPtr 1 op
     IR.retVoid
 
+-- | Build name for the recursive context from the
+-- recursive function variable name.
+mkRecContextName :: Var -> A.Name
+mkRecContextName (Var txt) = A.Name $ textToSBS $ txt <> ".context"
+
+-- | Introduce a new local variable.
+--
+-- Updates the table of fresh names in the IR.
+introVarName :: Var -> BuildIR A.Name
+introVarName (Var txt) = IR.freshName $ textToSBS txt
+
+-- | Get the latest version of a name.
+--
+-- This is a fairly hacky solution that relies on name shadowing
+-- being a type error. Our problem is that let blocks disappear in
+-- LLVM IR. However, because all usage of a type name is disjoint,
+-- we can simply always use the latest version of a name.
+localVarName :: Var -> BuildIR A.Name
+localVarName (Var txt) = do
+  usedNames <- IR.liftIRState $ gets IR.builderUsedNames
+  let rawName = textToSBS txt
+      nameCount = fromMaybe 0 $ Map.lookup rawName usedNames
+      name = rawName <> fromString ("_" <> show nameCount)
+  pure $ A.Name name
+
+-- | Generate the LLVM IR for expressions.
+genIR :: A.Type -> SpecIR -> BuildIR A.Operand
+genIR cenvTy = go where
+  -- | Where we handle all of the IR cases.
+  go :: SpecIR -> BuildIR A.Operand
+  go expr = case expr.specf of
+    AppSF funExpr args -> do
+      -- TODO: add information about whether the closure/fun val was consumed and we need to
+      -- clean up. Will only matter for function values? So I guess variables?
+      argOps <- traverse go args
+      case funExpr.specf of
+        ClosureSF funMVar env -> error "TODO"
+        RecClosureSF funMVar contextVar -> do
+          let cenvName = mkRecContextName contextVar
+              cenvOp = A.LocalReference cenvTy $ cenvName
+          knownCall funMVar cenvOp argOps
+        _ -> do
+          let retTy = opaqueTypeFor expr.ty
+              -- if it's a bare function type we know we're dropping it.
+              isDropped = case funExpr.ty.tyf of
+                FunTy _ _ _ _ -> True
+                _ -> False
+          funVal <- go funExpr
+          result <- funValCall retTy funVal argOps
+          when isDropped $ freeClosurePtrIn funVal
+          pure result
+    VarSF var -> do
+      let ty = opaqueTypeFor expr.ty
+      name <- localVarName var
+      pure $ A.LocalReference ty name
+    _ -> error "TODO"
+
+-- | Generate the entry and fast function.
 genFun :: MVar -> ClosureEnv -> (Maybe SVar) -> [(SVar, Ty, Mult)] -> SpecIR -> Gen ClosureInfo
 genFun funMVar cenv mbFix params body = do
-  cenvTys <- traverse closureUseTy cenv.envMap
   cim <- gets (.closureInfo)
   case M.lookup funMVar cim of
     Just ci -> pure ci
@@ -525,8 +657,11 @@ genFun funMVar cenv mbFix params body = do
       ctxTy <- closureEnvToType cenv
       llvmParams <- traverse mkLlvmParam params
       (_, fastBlocks) <- runBuildIR do
+        case mbFix of
+          Nothing -> pure ()
+          Just SVar{var} -> error "TODO create function value that calls this function and store it"
         extractClosureEnv cenv $ A.LocalReference ctxTy contextName
-        genIR body
+        genIR ctxTy body
       let fastParams = (A.Parameter ctxTy contextName []):llvmParams
           fastName = mvarToName $ mangleFastFun funMVar
           fastDef = baseFunctionDefaults
@@ -536,20 +671,18 @@ genFun funMVar cenv mbFix params body = do
             , AG.returnType = fastRetTy
             }
           llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
-          genClosure = do
-            mallocType $ error "build closure type"
       emitDefn $ A.GlobalDefinition fastDef
-      let closureInfo = ClosureInfo $ error "TODO"
+      genEntryFun funMVar body.ty fastRetTy llvmArgTys
+      let closureInfo = ClosureInfo $ prepareFunValue funMVar cenv ctxTy
       addClosureInfo funMVar closureInfo
       pure closureInfo
   where
-  contextName = A.Name "fun.context"
+  contextName = case mbFix of
+    Nothing -> A.Name "nothing.context"
+    Just svar -> mkRecContextName svar.var
   mkLlvmParam (svar, ty, _) = do
     ty' <- toLlvmType ty
     pure $ A.Parameter ty' (varToName svar.var) []
-  -- | We generate all of the IR here so that we can access `mbFixName`.
-  genIR :: SpecIR -> BuildIR A.Operand
-  genIR exp = error "unimplemented"
 
 -- | Declare the external functions for all the important calls like malloc.
 llvmDeclarations :: Gen ()
@@ -581,21 +714,26 @@ genDecl mvar decl = case decl of
   SpecDataType sdt -> void $ genType mvar sdt
   SpecFun cenv mbFix args bodyIR -> pure () -- not yet implemented
 
-runGen :: M.HashMap MVar SpecDecl -> I.Context -> A.DataLayout -> IO (Either GenErr [A.Definition])
-runGen specDecls llvmCtx dl = do
-  forM_ (M.toList specDecls) \(v, sd) -> do
+-- | Generate a list of LLVM definitions.
+--
+-- Takes a map of declarations and a list of declarations in the correct load order.
+runGen :: M.HashMap MVar SpecDecl -> [(MVar, SpecDecl)]
+  -> I.Context -> A.DataLayout -> IO (Either GenErr [A.Definition])
+runGen specDeclMap specDecls llvmCtx dl = do
+  forM_ specDecls \(v, sd) -> do
     print $ show v <> ": " <> show sd
   let genCtx = GenCtx {
         llvmContext=llvmCtx,
         dataLayout=dl,
-        specDecls=specDecls,
+        specDecls=specDeclMap,
         moduleState=emptyModuleBuilder,
         closureInfo=M.empty
         }
       f = fmap \(_,ctx) -> SL.unSnocList $ ctx.moduleState.builderDefs
       act = do
+        -- TODO: at the start we go through and forward declare all functions.
         llvmDeclarations
-        traverse_ (uncurry genDecl) $ M.toList specDecls
+        traverse_ (uncurry genDecl) $ specDecls
         let unitTy = A.NamedTypeReference "Two%"
         global "testG" unitTy $ A.Struct Nothing False []
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act

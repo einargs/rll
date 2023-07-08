@@ -19,9 +19,6 @@ import Data.List (foldl')
 import Control.Exception (assert)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Aeson (FromJSON, ToJSON)
-import Data.Aeson qualified as A
-import GHC.Generics (Generic)
 import Prettyprinter
 -- import Debug.Trace qualified as D
 
@@ -44,6 +41,8 @@ data LocalFun
 
 data SpecCtx = SpecCtx
   { specDecls :: M.HashMap MVar SpecDecl
+  -- | A list of spec decls as they've been added.
+  , specDeclOrder :: [(MVar, SpecDecl)]
   , enclosingFun :: MVar
   -- | variables that refer to local functions.
   , localFuns :: M.HashMap Var LocalFun
@@ -298,8 +297,10 @@ freshLambdaName tys = do
 
 -- | Insert a SpecDecl.
 addSpecDecl :: MVar -> SpecDecl -> Spec ()
-addSpecDecl mvar sd = modify' \ctx ->
-  ctx{specDecls=M.insert mvar sd ctx.specDecls}
+addSpecDecl mvar sd = modify' \ctx -> ctx
+  { specDecls = M.insert mvar sd ctx.specDecls
+  , specDeclOrder = (mvar,sd):ctx.specDeclOrder
+  }
 
 -- | Store a non-polymorphic lambda in `specDecls`.
 storeLambda :: Maybe SVar -> [(SVar, Ty, Mult)] -> ClosureEnv -> Core -> Spec MVar
@@ -402,6 +403,7 @@ specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
   where
   ctx = SpecCtx
     { specDecls = M.empty
+    , specDeclOrder = []
     , coreDataTypes = dataTypes
     , coreFuns = M.fromList coreFuns
     , localFuns = M.empty

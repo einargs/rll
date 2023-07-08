@@ -235,7 +235,6 @@ parseTyCon ty = collectApps [] ty where
     TyCon v -> Just (v, reverse rs)
     _ -> Nothing
 
-
 instance Pretty Ty where
   pretty = basePrettyTy NoTyParen
 

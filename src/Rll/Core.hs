@@ -1,17 +1,11 @@
 {-# LANGUAGE DeriveTraversable #-}
 module Rll.Core
-  ( CoreF(..), Core(..), ClosureEnv(..), ClosureUse(..)
+  ( CoreF(..), Core(..)
   , extendAppTm
   ) where
 
 import Rll.Ast
 import Rll.Context (DataType)
-
-import Data.Text (Text)
-import Prettyprinter
-import Data.HashMap.Strict qualified as M
-import Data.Aeson (FromJSON(..), ToJSON(..))
-import GHC.Generics (Generic)
 
 -- | This IR is produced during type checking and annotates every
 -- term with its type.

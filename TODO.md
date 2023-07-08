@@ -84,13 +84,29 @@ Spec tests
   function types. That would make some of my functions nicer.
 
 ## LLVM
-- [ ] I'll need to have some way of inserting drops when we consume a multi-use
-  function while calling it.
-  - I might need to add some extra info to `SpecIR` for that.
-  - But the drops for consumed multi-use functions can happen after a generated
-    call.
-- [ ] Inside the generated IR I should drop closures when they're consumed instead of relying
+- [ ] Before generating IR for the body of a function, we need to precalculate their
+  types. Or I could use named types.
+- [ ] Potential problem: how are zero argument functions/rebuilt values going to work?
+  I'll have to write tests for them.
+- [ ] Check whether recursive function closures become part of a closure environment
+  so they can get passed on.
+  - Aha -- they don't need to be; they'll just take the normal function value that the
+    recursive function variable holds. We should only need the special context variable
+    for recursive functions.
+- [ ] Create normal variables holding the function value when we have a recursive function
+  declared.
+- [X] Double check that shadowing a variable creates a type error so that we don't have
+  to worry about creating fresh names.
+  - If I ever need to, I can disambiguate names during `Spec`.
+  - Make sure that this also applies to recursive function names.
+- [X] Inside the generated IR I should drop closures when they're consumed instead of relying
   on the entry function to do it if necessary.
+  - I should have that working using the type of the called function value. If it's bare, I know
+    I should free the closure pointer.
+- [X] Work on breaking `genEntryFun` up so that the entry block generation isn't so monolithic.
+  - [ ] Consider writing utilities to load and store to `indexStructPtr`; it would simplify
+    some of the helpers in that block.
+- [X] `genEntryFun` should be working.
 - [ ] Look into whether I can just leave `load` and `alloca` instructions with the `align` arg
   as `1` or if I need to pass the data layout around and read from that. I think that it'll
   automatically promote the alignment based on the stack alignment.
@@ -346,6 +362,9 @@ These are eventual things to do for polishing.
 - [ ] Figure out how to calculate the alignment for `load` instructions so I don't have to default to `1`.
 - [ ] It might be better to add the multiplicities to arguments in the `Core` IR, but doing it in
   spec works perfectly fine for now. And it avoids having to worry about the multiplicities of polymorphism.
+- [ ] Once I've worked out all the ways I want to mangle things, I can use a data structure for `MVar`s
+  and then when I finally convert them to text I'll use a lazy text to accumulate everything and then convert
+  straight to a single strict text.
 
 ## Better Errors
 - [X] Improve the context join error to highlight the areas that conflict and label them directly

@@ -7,7 +7,7 @@ import Test.Hspec
 
 spec :: Spec
 spec = do
-    (willSpec, commitUpdates) <- runIO prepare
+    (willSpec, commitUpdates) <- runIO $ prepare $ Nothing
     afterAll_ commitUpdates $ describe "specialization" do
       it "can do the bare main function" do
         willSpec Test "bare main"
