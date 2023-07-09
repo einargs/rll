@@ -19,7 +19,7 @@ data CoreF a
   | ConCF DataType Var
   | CopyCF Var
   | RefCF Var
-  | DropCF SVar a
+  | DropCF SVar Ty a
   | AppTmCF a [a]
   | AppTyCF a [Ty]
   | LiteralCF Literal

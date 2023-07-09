@@ -614,18 +614,41 @@ localVarName (Var txt) = do
       name = rawName <> fromString ("_" <> show nameCount)
   pure $ A.Name name
 
+-- | Uses `localVarName` to build a local reference operand.
+localVarOp :: Var -> A.Type -> BuildIR A.Operand
+localVarOp var ty = do
+  name <- localVarName var
+  pure $ A.LocalReference ty name
+
+-- | Build a structure containing all free variables in a closure.
+buildClosureEnv :: ClosureEnv -> BuildIR A.Operand
+buildClosureEnv cenv = traverse go (M.toList cenv.envMap) >>= buildStructIR
+  where
+  go (var, ty) = localVarOp var $ useTy ty
+  useTy (Moved ty) = opaqueTypeFor ty
+  useTy _ = A.ptr
+
 -- | Generate the LLVM IR for expressions.
 genIR :: A.Type -> SpecIR -> BuildIR A.Operand
 genIR cenvTy = go where
   -- | Where we handle all of the IR cases.
   go :: SpecIR -> BuildIR A.Operand
   go expr = case expr.specf of
+    ClosureSF funMVar cenv -> do
+      cenvOp <- buildClosureEnv cenv
+      closurePtr <- buildClosurePtr [cenvOp]
+      buildFunValueFor funMVar closurePtr
+    RecClosureSF funMVar contextVar -> do
+      let cenvName = mkRecContextName contextVar
+          cenvOp = A.LocalReference cenvTy $ cenvName
+      closurePtr <- buildClosurePtr [cenvOp]
+      buildFunValueFor funMVar closurePtr
     AppSF funExpr args -> do
-      -- TODO: add information about whether the closure/fun val was consumed and we need to
-      -- clean up. Will only matter for function values? So I guess variables?
       argOps <- traverse go args
       case funExpr.specf of
-        ClosureSF funMVar env -> error "TODO"
+        ClosureSF funMVar cenv -> do
+          cenvOp <- buildClosureEnv cenv
+          knownCall funMVar cenvOp argOps
         RecClosureSF funMVar contextVar -> do
           let cenvName = mkRecContextName contextVar
               cenvOp = A.LocalReference cenvTy $ cenvName
@@ -644,6 +667,17 @@ genIR cenvTy = go where
       let ty = opaqueTypeFor expr.ty
       name <- localVarName var
       pure $ A.LocalReference ty name
+    CopySF var -> do
+      name <- localVarName var
+      pure $ A.LocalReference A.ptr name
+    DropSF svar varTy body -> do
+      case varTy.tyf of
+        FunTy Many _ _ _ -> do
+          varOp <- localVarOp svar.var funValueType
+          freeClosurePtrIn varOp
+        RefTy _ _ -> pure ()
+        _ -> error "shouldn't be able to drop this"
+      go body
     _ -> error "TODO"
 
 -- | Generate the entry and fast function.

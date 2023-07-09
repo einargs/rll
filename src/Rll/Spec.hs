@@ -17,7 +17,6 @@ import Control.Monad (void, forM_)
 import Data.Foldable (traverse_)
 import Data.List (foldl')
 import Control.Exception (assert)
-import Data.Text (Text)
 import Data.Text qualified as T
 import Prettyprinter
 -- import Debug.Trace qualified as D
@@ -109,16 +108,17 @@ typeSubInCore tyCtx = go 0 where
   -- type and instead building it based on structure of core and the types
   -- of descendants.
   go :: Int -> Core -> Core
-  go xi core@Core{ty, span, coref} = Core (goTy ty) span $ case coref of
-    AppTyCF t1 tys -> AppTyCF (f t1) $ goTy <$> tys
-    LamCF fix polyB argB env t1 -> LamCF fix polyB (fmap goTy <$> argB) env $ f t1
+  go xi core@Core{ty, span, coref} = Core (applyTyCtx ty) span $ case coref of
+    AppTyCF t1 tys -> AppTyCF (f t1) $ applyTyCtx <$> tys
+    DropCF var varTy body -> DropCF var (applyTyCtx varTy) $ f body
+    LamCF fix polyB argB env t1 -> LamCF fix polyB (fmap applyTyCtx <$> argB) env $ f t1
     _ -> f <$> coref
     where
+    f = go xi
     -- Because the type arguments should have no type variables, we
     -- don't need to shift them.
     g ty (i, arg) = rawTypeSub (xi+i) arg ty
-    goTy baseTy = foldl' g baseTy $ zip [0..] tyCtx
-    f = go xi
+    applyTyCtx baseTy = foldl' g baseTy $ zip [0..] tyCtx
 
 -- | Substitute type arguments into the types of arguments.
 typeSubInArgs :: [Ty] -> [(SVar, Ty, Mult)] -> [(SVar, Ty, Mult)]
@@ -241,7 +241,7 @@ specExpr core@Core{span, coref} = do
       Nothing -> pure $ sf $ VarSF v
     RefCF v -> pure $ sf $ RefSF v
     CopyCF v -> pure $ sf $ CopySF v
-    DropCF sv t1 -> fmap sf $ DropSF sv <$> specExpr t1
+    DropCF sv ty t1 -> fmap sf $ DropSF sv ty <$> specExpr t1
     LiteralCF lit -> pure $ sf $ LiteralSF lit
     ConCF dt v -> sf <$> specDataCon dt v span core.ty [] []
     AppTmCF t1 args -> do

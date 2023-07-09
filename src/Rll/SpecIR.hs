@@ -53,7 +53,7 @@ data SpecF a
   | ConSF MVar Var [a]
   | CopySF Var
   | RefSF Var
-  | DropSF SVar a
+  | DropSF SVar Ty a
   | AppSF a [a]
   | LiteralSF Literal
   deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
@@ -97,7 +97,7 @@ instance Pretty SpecIR where
       LetSF v t1 t2 ->
         "let" <+> pretty v <+> "="
         <+> group (go 0 t1) <+> "in" <> line <> go 0 t2
-      DropSF v t1 -> "drop" <+> pretty v <+> "in" <> line <> go 0 t1
+      DropSF v _ t1 -> "drop" <+> pretty v <+> "in" <> line <> go 0 t1
       ClosureSF v env -> pretty v <> group (pretty env)
       RecClosureSF mv recFun -> pretty mv <> "{" <> pretty recFun <> "}"
       VarSF v -> "!" <> pretty v

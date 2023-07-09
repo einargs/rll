@@ -84,6 +84,12 @@ Spec tests
   function types. That would make some of my functions nicer.
 
 ## LLVM
+- [X] Currently in the middle of adding the type of the dropped variable to `Drop`.
+  - [X] This means I need to fix all of the type substitution code.
+  - [X] Also need to fix the test code.
+- [ ] I think I have a bug where if you have a reference to a function and apply
+  a type application to it, you get a function value instead of a reference. This
+  means you could drop it again, causing a double free.
 - [ ] Before generating IR for the body of a function, we need to precalculate their
   types. Or I could use named types.
 - [ ] Potential problem: how are zero argument functions/rebuilt values going to work?
@@ -394,6 +400,8 @@ These are eventual things to do for polishing.
     substitution thing. If I type substitution and renaming to it's own file
     then `TypeCheck.hs` and `Spec.hs` can import that on their own.
   - [ ] Maybe move the `LtSet` stuff to their own file?
+- [ ] Rename `ClosureEnv` to help disambiguate between a closure pointer/object,
+  a function value, and the structure holding all free variables in a closure.
 
 # Feature Thoughts
 Thoughts about various future features.

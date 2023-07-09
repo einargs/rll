@@ -15,7 +15,6 @@ import Data.Text qualified as T
 import qualified Data.HashMap.Strict as M
 import Data.List (find, unzip4, foldl')
 import Data.Maybe (catMaybes)
-import Debug.Trace qualified as D
 
 -- | Use this to construct the type of a reference type.
 createVarRef :: Var -> Span -> Tc Ty
@@ -493,9 +492,10 @@ synthAppTy t1 tys s = do
 synth :: Tm -> Tc Core
 synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
   Drop sv t -> do
+    varTy <- lookupVar sv.var sv.span
     dropVar sv.var sv.span
     tCore <- synth t
-    pure $ Core tCore.ty s $ DropCF sv tCore
+    pure $ Core tCore.ty s $ DropCF sv varTy tCore
   LetStruct con vars t1 t2 -> letStructClause s con vars t1 t2 synth
   TmCon v -> do
     (dt, ty) <- lookupDataCon v s
@@ -554,9 +554,10 @@ check ty tm@Tm{span=s, tmf} = verifyCtxSubset s $ case tmf of
   Case t1 branches -> caseClause s t1 branches $ Check ty
   LetStruct con vars t1 t2 -> letStructClause s con vars t1 t2 $ check ty
   Drop sv t -> do
+    varTy <- lookupVar sv.var sv.span
     dropVar sv.var sv.span
     tCore <- check ty t
-    cf $ DropCF sv tCore
+    cf $ DropCF sv varTy tCore
   FunTm mbFix polyB argB body -> checkFunTm s mbFix polyB argB body ty
   _ -> do
     tmCore@Core{ty=ty'} <- synth tm
