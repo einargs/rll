@@ -252,13 +252,6 @@ verifyCtxSubset s m = do
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
-  {-
-  D.traceM $ "Dropping " <> show v <> " borrow count " <> show borrowCount <> " ty " <> show ty
-  case ty.tyf of
-    RefTy (Ty _ (LtOf p)) _ -> do
-      (parentCount, _) <- lookupEntry p s
-      D.traceM $ "Parent " <> show p <> " borrow count " <> show parentCount
-    _ -> pure () -}
   unless (borrowCount == 0) $ do
     borrowers <- variablesBorrowing v
     throwError $ CannotDropBorrowedVar v borrowers s
@@ -267,13 +260,6 @@ dropVar v s = do
     Univ Many l _ _ _ -> decrementLts l
     FunTy Many _ l _ -> decrementLts l
     _ -> throwError $ CannotDropTy ty s
-  {-
-  case ty.tyf of
-    RefTy (Ty _ (LtOf p)) _ -> do
-      (parentCount, _) <- lookupEntry p s
-      D.traceM $ "END: parent " <> show p <> " borrow count " <> show parentCount
-    _ -> pure ()
-  -}
   deleteVar v s
 
 -- | Add the value to the variables referenced in the type.
