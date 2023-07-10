@@ -322,9 +322,9 @@ addNamedInstr name instr = IR.modifyBlock \bb -> bb
 extractClosureEnv :: ClosureEnv -> A.Operand -> BuildIR ()
 extractClosureEnv cenv value = do
   t <- typeOf value
-  varNames <- traverse introVarName $ M.keys cenv.envMap
-  forM_ (zip [0..] varNames) \(i,n) ->
-    addNamedInstr n $ A.ExtractValue value [i] []
+  forM_ (zip [0..] $ M.keys cenv.envMap) \(i,v) -> do
+    val <- IR.extractValue value [i]
+    introVar v val
 
 -- | Load all of the variables from the environment and store
 -- them in the closure structure.
@@ -600,6 +600,17 @@ mkRecContextName (Var txt) = A.Name $ textToSBS $ txt <> ".context"
 introVarName :: Var -> BuildIR A.Name
 introVarName (Var txt) = IR.freshName $ textToSBS txt
 
+-- | Takes a variable and a value and returns a pointer to
+-- that value allocated on the stack.
+introVar :: Var -> A.Operand -> BuildIR A.Operand
+introVar var value = do
+  name <- introVarName var
+  t <- typeOf value
+  addNamedInstr name $ A.Alloca t Nothing 1 []
+  let loc = A.LocalReference A.ptr name
+  IR.store loc 1 value
+  pure loc
+
 -- | Get the latest version of a name.
 --
 -- This is a fairly hacky solution that relies on name shadowing
@@ -614,19 +625,33 @@ localVarName (Var txt) = do
       name = rawName <> fromString ("_" <> show nameCount)
   pure $ A.Name name
 
+-- | A predicate determining whether a type is allocated
+-- on the stack or not.
+isOnStack :: Ty -> Bool
+isOnStack ty = case ty.tyf of
+  FunTy _ _ _ _ -> False
+  RefTy _ _ -> False
+  _ -> True
+
 -- | Uses `localVarName` to build a local reference operand.
-localVarOp :: Var -> A.Type -> BuildIR A.Operand
-localVarOp var ty = do
+--
+-- `onStack` indicates whether or not to load the variable from the
+-- stack.
+localVarOp :: Var -> Bool -> A.Type -> BuildIR A.Operand
+localVarOp var onStack llvmTy = do
   name <- localVarName var
-  pure $ A.LocalReference ty name
+  if onStack
+    then do
+      let varPtr = A.LocalReference A.ptr name
+      IR.load llvmTy varPtr 1
+    else pure $ A.LocalReference llvmTy name
 
 -- | Build a structure containing all free variables in a closure.
 buildClosureEnv :: ClosureEnv -> BuildIR A.Operand
 buildClosureEnv cenv = traverse go (M.toList cenv.envMap) >>= buildStructIR
   where
-  go (var, ty) = localVarOp var $ useTy ty
-  useTy (Moved ty) = opaqueTypeFor ty
-  useTy _ = A.ptr
+  go (var, Moved ty) = localVarOp var True $ opaqueTypeFor ty
+  go (var, _) = localVarOp var False A.ptr
 
 -- | Generate the LLVM IR for expressions.
 genIR :: A.Type -> SpecIR -> BuildIR A.Operand
@@ -663,22 +688,27 @@ genIR cenvTy = go where
           result <- funValCall retTy funVal argOps
           when isDropped $ freeClosurePtrIn funVal
           pure result
-    VarSF var -> do
-      let ty = opaqueTypeFor expr.ty
-      name <- localVarName var
-      pure $ A.LocalReference ty name
-    CopySF var -> do
-      name <- localVarName var
-      pure $ A.LocalReference A.ptr name
+    VarSF var -> localVarOp var (isOnStack expr.ty) $ opaqueTypeFor expr.ty
+    CopySF var -> localVarOp var False A.ptr
     DropSF svar varTy body -> do
       case varTy.tyf of
         FunTy Many _ _ _ -> do
-          varOp <- localVarOp svar.var funValueType
+          varOp <- localVarOp svar.var False funValueType
           freeClosurePtrIn varOp
         RefTy _ _ -> pure ()
         _ -> error "shouldn't be able to drop this"
       go body
-    _ -> error "TODO"
+    LetSF svar t1 t2 -> do
+      t1Val <- go t1
+      introVar svar.var $ t1Val
+      -- NOTE: in the future I can probably use the lifetime intrinsics to
+      -- start and end the alloc lifetime around `go t2`.
+      go t2
+    RefSF var -> localVarOp var False A.ptr
+    ConSF dtMVar conVar args -> error "TODO"
+    CaseSF t1 branches -> error "TODO"
+    LetStructSF conVar memVars t1 t2 -> error "TODO"
+    LiteralSF lit -> error "TODO"
 
 -- | Generate the entry and fast function.
 genFun :: MVar -> ClosureEnv -> (Maybe SVar) -> [(SVar, Ty, Mult)] -> SpecIR -> Gen ClosureInfo

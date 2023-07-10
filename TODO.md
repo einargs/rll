@@ -84,6 +84,14 @@ Spec tests
   function types. That would make some of my functions nicer.
 
 ## LLVM
+- [X] I'm going to have to redo everything to use `alloca` so that taking the reference
+  of something actually means a damn.
+  - You can't take the reference of a reference, so I guess that could be a normal variable.
+    - That might mean I have to pass around the type of stuff so I know if I need to load
+      it? Well, I guess I already do need to do that.
+  - Actually easier than I thought. `genIR` could still return variables holding values.
+    Just needed logic to load from those variables at `VarSF` etc.
+- [X] In the future I can make it so that I don't store references on the stack?
 - [X] Currently in the middle of adding the type of the dropped variable to `Drop`.
   - [X] This means I need to fix all of the type substitution code.
   - [X] Also need to fix the test code.
