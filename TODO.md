@@ -91,6 +91,9 @@ Spec tests
       it? Well, I guess I already do need to do that.
   - Actually easier than I thought. `genIR` could still return variables holding values.
     Just needed logic to load from those variables at `VarSF` etc.
+- [ ] I think I want to maybe mark the functions that wrap constructors as always inline,
+  so that the entry function inlines them.
+- [ ] I need some way to get information about the data type for constructors and cases.
 - [X] In the future I can make it so that I don't store references on the stack?
 - [X] Currently in the middle of adding the type of the dropped variable to `Drop`.
   - [X] This means I need to fix all of the type substitution code.
@@ -134,6 +137,7 @@ Spec tests
   function would know how to interpret and cast based on info. Then it would loop over that
   part until it had called everything.
   - I think this is basically the worst parts of eval/apply and push/enter.
+- [ ] Eventually I should list the tags for different enums constructors as part of the data type.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.

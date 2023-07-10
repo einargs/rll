@@ -19,12 +19,13 @@ import Data.HashMap.Strict qualified as M
 import Control.Monad (void, forM_, forM, when)
 import Data.Foldable (traverse_, foldlM)
 import Data.Functor (($>), (<&>))
-import Data.List (zip4)
+import Data.List (zip4, sortBy)
 import GHC.Stack (HasCallStack)
 import Debug.Trace qualified as D
 import Control.Exception (assert)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, fromJust)
 import Data.String (fromString)
+import Data.Function (on)
 
 import LLVM.Internal.FFI.DataLayout (getTypeAllocSize)
 import LLVM.Internal.DataLayout (withFFIDataLayout)
@@ -42,7 +43,6 @@ import LLVM.Internal.Type ()
 import LLVM.AST.DataLayout qualified as A
 import LLVM.AST.Global qualified as AG
 import LLVM.AST.FunctionAttribute qualified as A
-import LLVM.AST.ParameterAttribute qualified as A
 import LLVM.AST.IntegerPredicate qualified as IP
 import LLVM.AST.Instruction qualified as A
 import LLVM.AST.Constant qualified as A
@@ -82,6 +82,22 @@ data GenErr
 
 newtype Gen a = MkGen { unGen :: StateT GenCtx (ExceptT GenErr IO) a }
   deriving newtype (Functor, Applicative, Monad, MonadState GenCtx, MonadIO, MonadError GenErr)
+
+-- | Run the IR builder with the module builder info.
+--
+-- Because Gen has IO in it, we can't use recursive do if we run
+-- `IRBuilderT Gen`. So we run a pure version and then update
+-- `Gen` with any changes to the module builder state.
+runBuildIR :: BuildIR a -> Gen (a, [A.BasicBlock])
+runBuildIR act = state \genCtx ->
+  let (result, modState') = run genCtx.moduleState IR.emptyIRBuilder act
+      genCtx' = genCtx{moduleState=modState'}
+  in (result, genCtx')
+  where
+  run modState irState =
+    flip runState modState . unModuleBuilderT . IR.runIRBuilderT irState
+
+type BuildIR = IR.IRBuilderT ModuleBuilder
 
 instance MonadModuleBuilder Gen where
   liftModuleState m = state \ctx ->
@@ -277,14 +293,20 @@ genType mvar sdt = do
   case Map.lookup (mvarToName mvar) typeDefs of
     Just ty -> pure ty
     Nothing -> case sdt of
-      SpecStruct con mems -> genStruct mvar mems
+      SpecStruct con mems -> genStruct mems >>= def mvar
       -- for the enums, we'll generate a type for each individual
       -- constructor and then do bitcasts.
       SpecEnum cons -> do
-        conTys <- traverse (uncurry genCon) $ M.toList cons
+        conTys <- traverse genStruct $ M.elems cons
         maxSize <- maximum <$> traverse getTypeSize conTys
         let payloadType = A.VectorType (fromIntegral maxSize) A.i8
-            enumTy = A.StructureType False $ [A.i32, payloadType]
+            enumTy = A.StructureType False $ [A.i8, payloadType]
+        -- Here we're creating types for each constructor that look like
+        -- { i8, ...rest }
+        forM_ (M.toList cons) \(con, mems) -> do
+          memTys <- traverse toLlvmType mems
+          let conTy = A.StructureType False $ A.i8:memTys
+          emitLlvmType (mangleDataCon mvar $ Var con) conTy
         def mvar enumTy
       SpecBuiltIn b -> case b of
         -- For these, we never need to generate a structure, so we just
@@ -293,13 +315,15 @@ genType mvar sdt = do
         SpecI64 -> pure A.i64
   where
   def mvar ty = emitLlvmType mvar ty $> ty
-  genCon :: Text -> [Ty] -> Gen A.Type
-  genCon con mems = genStruct (mangleDataCon mvar $ Var con) mems
-  genStruct :: MVar -> [Ty] -> Gen A.Type
-  genStruct mvar mems = do
+  genStruct :: [Ty] -> Gen A.Type
+  genStruct mems = do
     memTys <- traverse toLlvmType mems
-    let structTy = A.StructureType False memTys
-    def mvar structTy
+    pure $ A.StructureType False memTys
+
+-- | Build the opaque type representing a data constructor case.
+enumConType :: MVar -> Var -> A.Type
+enumConType dtMVar conVar = A.NamedTypeReference $
+  mvarToName $ mangleDataCon dtMVar conVar
 
 -- | Convert the closure usage annotations on a type into a
 -- llvm type.
@@ -353,22 +377,6 @@ baseFunctionDefaults = AG.functionDefaults {
   where
     funAttr :: [Either A.GroupID A.FunctionAttribute]
     funAttr = [Right A.NoUnwind]
-
-type BuildIR = IR.IRBuilderT ModuleBuilder
-
--- | Run the IR builder with the module builder info.
---
--- Because Gen has IO in it, we can't use recursive do if we run
--- `IRBuilderT Gen`. So we run a pure version and then update
--- `Gen` with any changes to the module builder state.
-runBuildIR :: BuildIR a -> Gen (a, [A.BasicBlock])
-runBuildIR act = state \genCtx ->
-  let (result, modState') = run genCtx.moduleState IR.emptyIRBuilder act
-      genCtx' = genCtx{moduleState=modState'}
-  in (result, genCtx')
-  where
-  run modState irState =
-    flip runState modState . unModuleBuilderT . IR.runIRBuilderT irState
 
 -- | Generate a call to the given function value using the given
 -- stack argument pointer.
@@ -636,7 +644,8 @@ isOnStack ty = case ty.tyf of
 -- | Uses `localVarName` to build a local reference operand.
 --
 -- `onStack` indicates whether or not to load the variable from the
--- stack.
+-- stack. If it's true, the variable is a pointer to the passed type.
+-- If it's false, the variable is the passed type.
 localVarOp :: Var -> Bool -> A.Type -> BuildIR A.Operand
 localVarOp var onStack llvmTy = do
   name <- localVarName var
@@ -705,8 +714,41 @@ genIR cenvTy = go where
       -- start and end the alloc lifetime around `go t2`.
       go t2
     RefSF var -> localVarOp var False A.ptr
-    ConSF dtMVar conVar args -> error "TODO"
-    CaseSF t1 branches -> error "TODO"
+    StructConSF dtMVar args -> error "TODO"
+    EnumConSF tagValue dtMVar conVar args -> do
+      let rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar
+      argOps <- traverse go args
+      conVal <- buildStructIR $ (IR.int8 tagValue):args
+      enumLoc <- IR.alloca rawEnumTy Nothing 1
+      IR.store enumLoc 1 conVal
+      IR.load rawEnumTy enumLoc 1
+    CaseSF t1 branches -> mdo
+      -- NOTE: I think I have to do this really annoying bitcast thing right now.
+      -- hopefully I can find optimization passes or something to avoid this. Or
+      -- a bitcast that works on structures.
+      let getConTxt (CaseBranch svar _ _) = svar.var.name
+          orderedBranches = sortBy (compare `on` getConTxt) branches
+          dtMVar = fromJust $ mvarForDataTy t1.ty
+      rawEnumVal <- go t1
+      conTag <- IR.extractValue rawEnumVal [0]
+      rawEnumTy <- typeOf rawEnumVal
+      enumLoc <- IR.alloca rawEnumTy Nothing 1
+      IR.store enumLoc 1 rawEnumVal
+      IR.switch conTag impossible $ dests <&> \(tagVal, label,_) -> (tagVal, label)
+      impossible <- IR.block `named` "impossible"
+      IR.unreachable
+      dests <- forM (zip [0..] orderedBranches) \(i, CaseBranch conSVar memSVars body) -> do
+        conLabel <- IR.block `named` textToSBS conSVar.var.name
+        let conTy = enumConType dtMVar conSVar.var
+        conVal <- IR.load conTy enumLoc 1
+        forM_ (zip [0..] memSVars) \(i, SVar{var}) -> do
+          mem <- IR.extractValue conVal [i]
+          introVar var mem
+        conResult <- go body
+        IR.br caseEnd
+        pure (A.Int 8 i, conLabel, conResult)
+      caseEnd <- IR.block `named` "caseEnd"
+      IR.phi $ dests <&> \(_, label, res) -> (res, label)
     LetStructSF conVar memVars t1 t2 -> error "TODO"
     LiteralSF lit -> error "TODO"
 

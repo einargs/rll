@@ -15,7 +15,7 @@ import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Control.Monad (void, forM_)
 import Data.Foldable (traverse_)
-import Data.List (foldl')
+import Data.List (foldl', elemIndex)
 import Control.Exception (assert)
 import Data.Text qualified as T
 import Prettyprinter
@@ -176,6 +176,12 @@ lookupSpecDataType v = do
     Just (SpecDataType dt) -> pure dt
     _ -> throwError $ NoSpecDataType v
 
+-- | Calculate the tag value for an enum constructor.
+tagValueFor :: Var -> M.HashMap Text [Ty] -> Integer
+tagValueFor Var{name} conMap = case elemIndex (M.keys conMap) name of
+  Nothing -> error "should be prevented by type checking"
+  Just i -> toInteger i
+
 -- | Generate a function wrapper around a data constructor to
 -- allow for partial application.
 --
@@ -206,7 +212,13 @@ genDataConFun dtVar conVar rawDT tyArgs = do
         f :: Ty -> Ty -> Ty
         f base arg = Ty dtSpan $ TyApp base arg
         irRetTy = foldl' f (Ty dtSpan $ TyCon dtName) tyArgs
-        ir = SpecIR irRetTy dtSpan $ ConSF dtVar conVar argExprs
+        conSF = case sdt of
+          SpecStruct _ _ -> StructConSF dtVar argExprs
+          SpecEnum conMap ->
+            let tagVal = tagValueFor conVar conMap
+            in EnumConSF tagVal dtVar conVar argExprs
+          SpecBuiltIn b -> error "temp: neither I64 or string has a constructor"
+        ir = SpecIR irRetTy dtSpan conSF
     pure $ SpecFun (ClosureEnv M.empty) Nothing funArgs ir
 
 -- | Generate the `SpecIR` for a data constructor, specialize the
@@ -218,8 +230,12 @@ specDataCon dt conVar conSpan conTy tyArgs args = do
   dtMVar <- specDataType dt tyArgs
   case compare argCount requiredArgCount of
     GT -> error "More arguments than constructor takes; should be caught in type checking"
-    EQ -> do
-      pure $ ConSF dtMVar conVar args
+    EQ -> pure $ case dt of
+      BuiltInType _ -> error "Currently no constructors for built-in types"
+      StructType _ _ _ _ -> pure $ StructConSF dtMVar args
+      EnumType _ _ conMap _ ->
+        let tagVal = tagValueFor conVar conMap
+        in pure $ EnumConSF tagVal dtMVar conVar args
     LT -> do
       fvar <- genDataConFun dtMVar conVar dt tyArgs
       let f = SpecIR conTy conSpan $ ClosureSF fvar (ClosureEnv M.empty)

@@ -48,9 +48,13 @@ data SpecF a
   | VarSF Var
   -- NOTE maybe have information about the source data type here? I'd
   -- probably add that in when building `Core`.
-  -- | A data type constructor. Has the mangled name of the data type,
-  -- the name of the constructor, and the fully saturated arguments.
-  | ConSF MVar Var [a]
+  -- | A struct constructor. Has the mangled name of the data type
+  -- and the fully saturated arguments.
+  | StructConSF MVar [a]
+  -- | An enum constructor. Has the tag value, the mangled name
+  -- of the data type, the name of the constructor, and the fully
+  -- saturated arguments.
+  | EnumConSF Integer MVar Var [a]
   | CopySF Var
   | RefSF Var
   | DropSF SVar Ty a
@@ -101,7 +105,8 @@ instance Pretty SpecIR where
       ClosureSF v env -> pretty v <> group (pretty env)
       RecClosureSF mv recFun -> pretty mv <> "{" <> pretty recFun <> "}"
       VarSF v -> "!" <> pretty v
-      ConSF dtName con args -> group $ prettyArgs
+      StructConSF dtName args -> group $ prettyArgs (pretty dtName) args
+      EnumConSF _ dtName con args -> group $ prettyArgs
         (pretty dtName <> "." <> pretty con) args
       CopySF v -> parenFor 1 $ "copy" <+> pretty v
       RefSF v -> "&" <> pretty v
