@@ -1286,3 +1286,30 @@ spec = parallel do
         let u = Unit in
         let Unit = u in u;
         |]
+
+    it "Type variables can be substituted into generic types" do
+      -- The problem was that type variables substituted into generic types could cause
+      -- the next substitution to replace already substituted types.
+      rawTest [txt|
+        struct Unit {}
+        struct L { }
+
+        struct R { Unit Unit }
+
+        struct Tuple (a:Type) (b:Type) { a b }
+
+        extractRight : forall M [] l:Lifetime. forall M [] a:Type. forall M [] b:Type.
+          &l (a -M[]> Unit) -M[]> ((Tuple a b) -S[l]> b)
+        = \destroyLeft tup ->
+        let Tuple left right = tup in
+        let Unit = destroyLeft left in
+        right;
+
+        enum Two = Left L | Right R;
+
+        main : Two
+        = let tup = Tuple [L] [R] L (R Unit Unit) in
+        let destroyL = \(l:L) -> let L = l in Unit in
+        let v = Right (extractRight ['destroyL] [L] [R] &destroyL tup) in
+        drop destroyL in v;
+        |]

@@ -3,6 +3,7 @@ module Rll.ScSpecUtil
   ( txt
   , prepare
   , parseFile
+  , parseFile'
   , clearTestData
   , STestConfig(..)
   ) where
@@ -39,8 +40,8 @@ emptyCEnv = ClosureEnv HM.empty
 -- | Are we logging the output for manual inspection or actually running the test.
 data STestConfig = Log | Test | LogJSON | UpdateJSON
 
-parseFile :: Text -> IO (Maybe (HM.HashMap MVar SpecDecl))
-parseFile txt = case MP.parse RP.fileDecls "test.rll" txt of
+parseFile' :: Text -> IO (Maybe ([(MVar, SpecDecl)], HM.HashMap MVar SpecDecl))
+parseFile' txt = case MP.parse RP.fileDecls "test.rll" txt of
   Left err -> exFail $ MP.errorBundlePretty err
   Right decls ->
     case runTc emptyCtx $ typeCheckFile decls of
@@ -48,11 +49,14 @@ parseFile txt = case MP.parse RP.fileDecls "test.rll" txt of
       Right (coreFns, ctx) ->
         case specModule ctx.dataTypes coreFns of
           Left err -> exFail $ "Specialization error: " <> show err
-          Right declMap -> pure $ Just declMap
+          Right declInfo -> pure $ Just declInfo
   where
   exFail msg = do
     expectationFailure msg
     pure Nothing
+
+parseFile :: Text -> IO (Maybe (HM.HashMap MVar SpecDecl))
+parseFile txt = fmap snd <$> parseFile' txt
 
 hasTypeVariables :: HM.HashMap MVar SpecDecl -> Bool
 hasTypeVariables = any checkDecl where

@@ -177,8 +177,8 @@ lookupSpecDataType v = do
     _ -> throwError $ NoSpecDataType v
 
 -- | Calculate the tag value for an enum constructor.
-tagValueFor :: Var -> M.HashMap Text [Ty] -> Integer
-tagValueFor Var{name} conMap = case elemIndex (M.keys conMap) name of
+tagValueFor :: Var -> M.HashMap T.Text [Ty] -> Integer
+tagValueFor Var{name} conMap = case elemIndex name (M.keys conMap) of
   Nothing -> error "should be prevented by type checking"
   Just i -> toInteger i
 
@@ -230,7 +230,7 @@ specDataCon dt conVar conSpan conTy tyArgs args = do
   dtMVar <- specDataType dt tyArgs
   case compare argCount requiredArgCount of
     GT -> error "More arguments than constructor takes; should be caught in type checking"
-    EQ -> pure $ case dt of
+    EQ -> case dt of
       BuiltInType _ -> error "Currently no constructors for built-in types"
       StructType _ _ _ _ -> pure $ StructConSF dtMVar args
       EnumType _ _ conMap _ ->
@@ -414,7 +414,7 @@ specFunDef name tyArgs = guardDecl mangledName do
 --
 -- Uses an unspecialized main function as an entry point.
 specModule :: M.HashMap Var DataType -> [(Var, Core)] ->
-  Either SpecErr (M.HashMap MVar SpecDecl)
+  Either SpecErr ([(MVar, SpecDecl)], M.HashMap MVar SpecDecl)
 specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
   where
   ctx = SpecCtx
@@ -426,4 +426,5 @@ specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
     , lambdaCounter = 0
     , enclosingFun = error "Should be overriden by specFunDef"
     }
-  run spec = fmap ((.specDecls) . snd) $ runExcept $ flip runStateT ctx $ unSpec spec
+  extract SpecCtx{specDeclOrder,specDecls} = (specDeclOrder, specDecls)
+  run spec = fmap (extract . snd) $ runExcept $ flip runStateT ctx $ unSpec spec

@@ -192,7 +192,8 @@ getStructMembers ty termSpan = do
   dt <- lookupDataType name $ getSpan conTy
   case dt of
     StructType structCon' tyParams memberTys _ -> do
-      pure $ (structCon', name, applyTypeParams args memberTys)
+      let memberTys' = applyTypeParams args memberTys
+      pure $ (structCon', name, memberTys')
     _ -> throwError $ TypeIsNotStruct conTy termSpan
 
 letStructClause :: Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core

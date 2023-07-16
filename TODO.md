@@ -329,6 +329,31 @@ Future tests.
 - [ ] Write some tests to make sure I can't trigger any problems with e.g. cloning and dropping my
   static lifetime references (i.e. recursive function references).
 - [ ] Write tests for `addMultToArgs`.
+- [ ] `willGen` isn't throwing the right error for forgetting to apply types to `extractRight`.
+  ```
+      willGen [txt|
+        struct Unit {}
+        struct L { }
+
+        struct R { Unit Unit }
+
+        struct Tuple (a:Type) (b:Type) { a b }
+
+        extractRight : forall M [] l:Lifetime. forall M [] a:Type. forall M [] b:Type.
+          &l (a -M[]> Unit) -M[]> Tuple L R -M[l]> R
+        = \destroyLeft tup ->
+        let Tuple l r = tup in
+        let Unit = destroyLeft l in
+        r;
+
+        enum Two = Left L | Right R;
+
+        main : Two
+        = let tup = Tuple [L] [R] L (R Unit Unit) in
+        let destroyL = \(l:L) -> let L = l in Unit in
+        Right (extractRight &destroyL tup);
+        |]
+  ```
 
 # Eventual Polish
 These are eventual things to do for polishing.
@@ -355,8 +380,8 @@ These are eventual things to do for polishing.
 - [ ] Rewrite to use the full recursion scheme library.
 - [ ] Avoid calculating difference between entrance and exit scopes twice for mult and consumed
   variables.
-- [ ] Remove excess `try` in the parser. Probably take it out of branch and then manually
-  add try where necessary.
+- [ ] Check that all excess `try` has been removed from the parser.
+  - Probably take it out of branch and remove branch.
 - [ ] Maybe a way of indicating a span is not directly linked to source, but inferred from that source.
 - [ ] Probably create a dedicated type equality thing that ignores TyVarBinding etc so that equality
   means equality.
@@ -457,6 +482,7 @@ Thoughts about various future features.
     in drop r in f;
     ```
 - [ ] Check if I can use types before they're declared in either other types or functions.
+- [ ] Something that lets me pass a multi-use function as a single use. Subtyping?
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

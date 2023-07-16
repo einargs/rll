@@ -19,7 +19,7 @@ typeShift i = rawTypeShift i 0
 
 rawTypeSub :: Int -> Ty -> Ty -> Ty
 rawTypeSub xi arg target@Ty{span=s, tyf} = case tyf of
-  TyVar v@(MkTyVar _ vi) -> if vi == xi then arg else Ty s $ TyVar v
+  TyVar v@(MkTyVar _ vi) -> if vi == xi then arg else target
   Univ m lts v k body -> Ty s $ Univ m (f lts) v k $
     rawTypeSub (xi+1) (typeShift 1 arg) body
   _ -> Ty s $ f <$> tyf
@@ -44,7 +44,11 @@ typeAppSub arg body = typeShift (-1) $
 --
 -- Type arguments, data type fields.
 applyTypeParams :: [Ty] -> [Ty] -> [Ty]
-applyTypeParams args members = go (length args - 1) args members where
+applyTypeParams args members = typeShift (-argLen) <$> go (argLen - 1) shiftedArgs members where
+  argLen = length args
+  -- We shift the arguments up by the number of type variables that can be present inside
+  -- the members so that there are no conflicts.
+  shiftedArgs = typeShift argLen <$> args
   go i [] members = members
   go i (a:as) members = go (i-1) as $
     rawTypeSub i a <$> members

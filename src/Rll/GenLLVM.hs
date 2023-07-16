@@ -49,6 +49,8 @@ import LLVM.AST.Constant qualified as A
 import LLVM.AST qualified as A
 import LLVM.AST.Type qualified as A
 
+-- TODO: I should look at why I never actually use the information stored in this.
+
 -- | Information about how to build the closure object.
 data ClosureInfo = ClosureInfo
   -- | Note that this will use the function variables in `ClosureEnv`
@@ -714,26 +716,36 @@ genIR cenvTy = go where
       -- start and end the alloc lifetime around `go t2`.
       go t2
     RefSF var -> localVarOp var False A.ptr
-    StructConSF dtMVar args -> error "TODO"
+    StructConSF dtMVar args -> traverse go args >>= buildStructIR
     EnumConSF tagValue dtMVar conVar args -> do
       let rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar
       argOps <- traverse go args
-      conVal <- buildStructIR $ (IR.int8 tagValue):args
+      conVal <- buildStructIR $ (IR.int8 tagValue):argOps
       enumLoc <- IR.alloca rawEnumTy Nothing 1
       IR.store enumLoc 1 conVal
       IR.load rawEnumTy enumLoc 1
     CaseSF t1 branches -> mdo
-      -- NOTE: I think I have to do this really annoying bitcast thing right now.
-      -- hopefully I can find optimization passes or something to avoid this. Or
-      -- a bitcast that works on structures.
       let getConTxt (CaseBranch svar _ _) = svar.var.name
           orderedBranches = sortBy (compare `on` getConTxt) branches
-          dtMVar = fromJust $ mvarForDataTy t1.ty
-      rawEnumVal <- go t1
-      conTag <- IR.extractValue rawEnumVal [0]
-      rawEnumTy <- typeOf rawEnumVal
-      enumLoc <- IR.alloca rawEnumTy Nothing 1
-      IR.store enumLoc 1 rawEnumVal
+      (enumLoc, conTag, dtMVar) <- case t1.ty.tyf of
+        RefTy _ dtTy -> do
+          let dtMVar' = fromJust $ mvarForDataTy dtTy
+              rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar'
+          enumLoc' <- go t1
+          conTagLoc <- indexStructPtr rawEnumTy enumLoc' 0
+          conTag' <- IR.load A.i8 conTagLoc 1
+          pure (enumLoc', conTag', dtMVar')
+        _ -> do
+          -- NOTE: I think I have to do this really annoying bitcast thing right now.
+          -- hopefully I can find optimization passes or something to avoid this. Or
+          -- a bitcast that works on structures.
+          let dtMVar' = fromJust $ mvarForDataTy t1.ty
+          rawEnumVal <- go t1
+          conTag' <- IR.extractValue rawEnumVal [0]
+          rawEnumTy <- typeOf rawEnumVal
+          enumLoc' <- IR.alloca rawEnumTy Nothing 1
+          IR.store enumLoc' 1 rawEnumVal
+          pure (enumLoc', conTag', dtMVar')
       IR.switch conTag impossible $ dests <&> \(tagVal, label,_) -> (tagVal, label)
       impossible <- IR.block `named` "impossible"
       IR.unreachable
@@ -749,7 +761,22 @@ genIR cenvTy = go where
         pure (A.Int 8 i, conLabel, conResult)
       caseEnd <- IR.block `named` "caseEnd"
       IR.phi $ dests <&> \(_, label, res) -> (res, label)
-    LetStructSF conVar memVars t1 t2 -> error "TODO"
+    LetStructSF conVar memSVars t1 t2 -> do
+      (structVal, dtMVar) <- case t1.ty.tyf of
+        RefTy _ dtTy -> do
+          let dtMVar' = fromJust $ mvarForDataTy dtTy
+              structTy = A.NamedTypeReference $ mvarToName dtMVar'
+          structPtr <- go t1
+          structVal' <- IR.load structTy structPtr 1
+          pure (structVal', dtMVar')
+        _ -> do
+          let dtMVar = fromJust $ mvarForDataTy t1.ty
+          structVal' <- go t1
+          pure (structVal', dtMVar)
+      forM_ (zip [0..] memSVars) \(i, SVar{var}) -> do
+        mem <- IR.extractValue structVal [i]
+        introVar var mem
+      go t2
     LiteralSF lit -> error "TODO"
 
 -- | Generate the entry and fast function.
@@ -762,11 +789,14 @@ genFun funMVar cenv mbFix params body = do
       fastRetTy <- toLlvmType body.ty
       ctxTy <- closureEnvToType cenv
       llvmParams <- traverse mkLlvmParam params
+      let ctxOp = A.LocalReference ctxTy contextName
       (_, fastBlocks) <- runBuildIR do
         case mbFix of
           Nothing -> pure ()
-          Just SVar{var} -> error "TODO create function value that calls this function and store it"
-        extractClosureEnv cenv $ A.LocalReference ctxTy contextName
+          Just SVar{var} -> do
+            buildFunValueFor funMVar ctxOp
+            error "TODO create function value that calls this function and store it"
+        extractClosureEnv cenv ctxOp
         genIR ctxTy body
       let fastParams = (A.Parameter ctxTy contextName []):llvmParams
           fastName = mvarToName $ mangleFastFun funMVar
@@ -818,7 +848,7 @@ freePtr ptrVal = do
 genDecl :: MVar -> SpecDecl -> Gen ()
 genDecl mvar decl = case decl of
   SpecDataType sdt -> void $ genType mvar sdt
-  SpecFun cenv mbFix args bodyIR -> pure () -- not yet implemented
+  SpecFun cenv mbFix args bodyIR -> void $ genFun mvar cenv mbFix args bodyIR
 
 -- | Generate a list of LLVM definitions.
 --
@@ -837,9 +867,6 @@ runGen specDeclMap specDecls llvmCtx dl = do
         }
       f = fmap \(_,ctx) -> SL.unSnocList $ ctx.moduleState.builderDefs
       act = do
-        -- TODO: at the start we go through and forward declare all functions.
         llvmDeclarations
         traverse_ (uncurry genDecl) $ specDecls
-        let unitTy = A.NamedTypeReference "Two%"
-        global "testG" unitTy $ A.Struct Nothing False []
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act

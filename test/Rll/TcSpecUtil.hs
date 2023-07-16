@@ -123,7 +123,7 @@ compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf} = case (core, tmf) of
   (CopyCF cv, Copy tv) -> cv #= tv
   (RefCF cv, RefTm tv) -> cv #= tv
   (AppTyCF c1 _, AppTy t1 _) -> compareCoreToTm c1 t1
-  (DropCF cv c1, Drop tv t1) -> cv #= tv <|> compareCoreToTm c1 t1
+  (DropCF cv _ c1, Drop tv t1) -> cv #= tv <|> compareCoreToTm c1 t1
   (AppTmCF c1 cs, _) ->
     let (ts, t1) = collectApps tm
     in compareCoreToTm c1 t1
