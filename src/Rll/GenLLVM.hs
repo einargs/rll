@@ -120,11 +120,12 @@ instance IR.MonadIRBuilder BuildIR where
 -- `Gen` with any changes to the module builder state.
 runBuildIR :: BuildIR a -> Gen (a, [A.BasicBlock])
 runBuildIR act = state \genCtx ->
-  let irState = BuildIRState {
+  let act' = act <* IR.block
+      irState = BuildIRState {
         buildIRLocal = IR.emptyIRBuilder,
         buildIRModule = genCtx.moduleState,
         buildIRClosures = genCtx.closureInfo }
-      (result, BuildIRState{..}) = flip LS.runState irState $ act.unBuildIR
+      (result, BuildIRState{..}) = flip LS.runState irState $ act'.unBuildIR
       genCtx' = genCtx{moduleState=buildIRModule}
   in ((result, SL.getSnocList buildIRLocal.builderBlocks), genCtx')
 
@@ -531,15 +532,15 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
     -- this is the number of already applied arguments stored in our
     -- closure.
     closureArgCount <- IR.load A.i32 oldClosurePtr 1 `named` "closureArgCount"
-    let impos' = D.trace "referencing impos" impos
-        jumps' = D.trace "jumps" jumps
-    IR.switch closureArgCount impos' jumps'
+    let impos' = D.trace (show funMVar <> " referencing impos") impos
+    IR.switch closureArgCount impos' jumps
 
     impos <- IR.block `named` "impossible1"
-    addr <- IR.alloca fastRetTy Nothing 1
-    val <- IR.load fastRetTy addr 1
-    IR.ret val
-    -- IR.unreachable
+    IR.unreachable
+    D.traceM $ "generated " <> show impos <> " for " <> show funMVar
+    -- addr <- IR.alloca fastRetTy Nothing 1
+    -- val <- IR.load fastRetTy addr 1
+    -- IR.ret val
 
     -- All closures will have a context argument stored in them,
     -- even if that context argument is a zero width type.
@@ -618,8 +619,8 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
     pure ()
   let entryBlockNames = entryBlocks <&> \(A.BasicBlock n _ _) -> n
       entryBlocks' = entryBlocks <&> \(A.BasicBlock n a b) ->
-        A.BasicBlock (D.trace ("block: " <> show n) n) a b
-  D.traceM $ "entryBlocks: " <> show entryBlockNames
+        A.BasicBlock (D.trace (show funMVar <> " block: " <> show n) n) a b
+  D.traceM $ show funMVar <> " entryBlocks: " <> show entryBlockNames
   emitDefn $ A.GlobalDefinition $ baseFunctionDefaults
     { AG.name = mvarToName $ mangleEntryFun funMVar
     , AG.parameters =
