@@ -23,10 +23,10 @@ willGen txt = do
       let layout = A.defaultDataLayout A.LittleEndian
       result <- runGen specDecls order ctx layout
       case result of
-        Left err -> expectationFailure $ show err
+        Left err -> expectationFailure $ "Gen error: " <> show err
         Right defs -> do
           let mod = A.Module "test" "test.rll" (Just layout) Nothing defs
-          print $ "defs: " <> show defs
+          -- print $ "defs: " <> show defs
           llvm <- L.withModuleFromAST ctx mod L.moduleLLVMAssembly
           BS.putStrLn llvm
 

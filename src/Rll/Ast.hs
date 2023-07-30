@@ -232,7 +232,7 @@ parseTyCon ty = collectApps [] ty where
   collectApps :: [Ty] -> Ty -> Maybe (Var, [Ty])
   collectApps rs ty = case ty.tyf of
     TyApp b a -> collectApps (a:rs) b
-    TyCon v -> Just (v, reverse rs)
+    TyCon v -> Just (v, rs)
     _ -> Nothing
 
 instance Pretty Ty where

@@ -138,6 +138,9 @@ Spec tests
   part until it had called everything.
   - I think this is basically the worst parts of eval/apply and push/enter.
 - [ ] Eventually I should list the tags for different enums constructors as part of the data type.
+- [ ] the mems is getting swapped for SpecStruct.
+- [ ] I want to go through and make the representation for a reference to a multi-use function just
+  a `funVal` struct.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -483,6 +486,8 @@ Thoughts about various future features.
     ```
 - [ ] Check if I can use types before they're declared in either other types or functions.
 - [ ] Something that lets me pass a multi-use function as a single use. Subtyping?
+- [ ] Could make gen and spec errors and such include a stack, since they're supposed to be
+  compiler errors.
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

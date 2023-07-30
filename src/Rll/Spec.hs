@@ -7,7 +7,7 @@ module Rll.Spec
 import Rll.Ast
 import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName, getDataConArgNum)
 import Rll.Core
-import Rll.TypeSub (rawTypeSub, applyTypeParams)
+import Rll.TypeSub (rawTypeSub, applyTypeParams, tyIsConcrete, typeAppSubs)
 import Rll.SpecIR
 
 import Data.HashMap.Strict qualified as M
@@ -19,7 +19,7 @@ import Data.List (foldl', elemIndex)
 import Control.Exception (assert)
 import Data.Text qualified as T
 import Prettyprinter
--- import Debug.Trace qualified as D
+import Debug.Trace qualified as D
 
 data Lambda = PolyLambda
   { fix :: Maybe SVar
@@ -103,22 +103,19 @@ addMultToArgs _ _ = error "function type should have been at least as long as th
 -- Takes multiple types to substitute to make it easier to use
 -- when specializing a polymorphic function.
 typeSubInCore :: [Ty] -> Core -> Core
-typeSubInCore tyCtx = go 0 where
+typeSubInCore tyCtx coreIn = assert (all tyIsConcrete tyCtx) $ go coreIn where
+  -- We assert that none of our arguments have type variables in them.
   -- NOTE could probably improve performance by not doing `goTy` on every
   -- type and instead building it based on structure of core and the types
   -- of descendants.
-  go :: Int -> Core -> Core
-  go xi core@Core{ty, span, coref} = Core (applyTyCtx ty) span $ case coref of
-    AppTyCF t1 tys -> AppTyCF (f t1) $ applyTyCtx <$> tys
-    DropCF var varTy body -> DropCF var (applyTyCtx varTy) $ f body
-    LamCF fix polyB argB env t1 -> LamCF fix polyB (fmap applyTyCtx <$> argB) env $ f t1
-    _ -> f <$> coref
+  go :: Core -> Core
+  go core@Core{ty, span, coref} = Core (applyTyCtx ty) span $ case coref of
+    AppTyCF t1 tys -> AppTyCF (go t1) $ applyTyCtx <$> tys
+    DropCF var varTy body -> DropCF var (applyTyCtx varTy) $ go body
+    LamCF fix polyB argB env t1 -> LamCF fix polyB (fmap applyTyCtx <$> argB) env $ go t1
+    _ -> go <$> coref
     where
-    f = go xi
-    -- Because the type arguments should have no type variables, we
-    -- don't need to shift them.
-    g ty (i, arg) = rawTypeSub (xi+i) arg ty
-    applyTyCtx baseTy = foldl' g baseTy $ zip [0..] tyCtx
+    applyTyCtx = typeAppSubs tyCtx
 
 -- | Substitute type arguments into the types of arguments.
 typeSubInArgs :: [Ty] -> [(SVar, Ty, Mult)] -> [(SVar, Ty, Mult)]
@@ -244,64 +241,72 @@ specDataCon dt conVar conSpan conTy tyArgs args = do
 -- | function for specializing the body of functions.
 specExpr :: Core -> Spec SpecIR
 specExpr core@Core{span, coref} = do
-  case core.ty.tyf of
-    Univ _ _ _ _ _ -> throwError $ MustSpec span
-    _ -> pure ()
-  case coref of
-    LetStructCF sv mems t1 t2 -> fmap sf $ LetStructSF sv mems <$> specExpr t1 <*> specExpr t2
-    ModuleVarCF v -> do
-      mvar <- specFunDef v []
-      pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
-    LocalVarCF v -> lookupLocalFun v >>= \case
-      Just _ -> sf <$> specLocalFun v []
-      Nothing -> pure $ sf $ VarSF v
-    RefCF v -> pure $ sf $ RefSF v
-    CopyCF v -> pure $ sf $ CopySF v
-    DropCF sv ty t1 -> fmap sf $ DropSF sv ty <$> specExpr t1
-    LiteralCF lit -> pure $ sf $ LiteralSF lit
-    ConCF dt v -> sf <$> specDataCon dt v span core.ty [] []
-    AppTmCF t1 args -> do
-      case t1.coref of
-        -- Because we want to immediately invoke appropriate constructors
-        -- we do this.
-        AppTyCF (Core _ conSpan (ConCF dt conVar)) tyArgs -> do
-          args' <- traverse specExpr args
-          sf <$> specDataCon dt conVar conSpan t1.ty tyArgs args'
-        ConCF dt conVar -> do
-          args' <- traverse specExpr args
-          sf <$> specDataCon dt conVar t1.span t1.ty [] args'
-        _ -> do
-          t1' <- specExpr t1
-          args' <- traverse specExpr args
-          pure $ sf $ AppSF t1' args'
-    AppTyCF t1 tys -> case t1.coref of
-      ConCF dt var -> sf <$> specDataCon dt var span core.ty tys []
-        -- mvar <- specDataType dt tys
-        -- pure $ sf $ ConSF mvar var
-      -- Recursive functions should be picked up here as well.
-      LocalVarCF v -> sf <$> specLocalFun v tys
+  sp <- mainBody
+  let err = error $ "spec type is a lifetime. Spec: " <> show sp <> "\n\nCore: " <> show core.ty
+  case sp.ty.tyf of
+    LtJoin _ -> err
+    LtOf _ -> err
+    _ -> pure sp
+  where
+  mainBody = do
+    case core.ty.tyf of
+      Univ _ _ _ _ _ -> throwError $ MustSpec span
+      _ -> pure ()
+    case coref of
+      LetStructCF sv mems t1 t2 -> fmap sf $ LetStructSF sv mems <$> specExpr t1 <*> specExpr t2
       ModuleVarCF v -> do
-        mvar <- specFunDef v tys
+        mvar <- specFunDef v []
         pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
-      LamCF fix polyB argB env body -> throwError $ NoImmediateSpec span
-      -- NOTE: how do we handle trying to specialize a reference?
-      -- I think that's automatically rejected?
-      _ -> error "Can't specialize this? Not certain if this can happen."
-    CaseCF t1 branches -> fmap sf $ CaseSF <$>
-      specExpr t1 <*> traverse (traverse specExpr) branches
-    LetCF sv t1 t2 -> case t1.coref of
-      LamCF fix polyB argB env body
-        | polyB /= [] -> do
-            let argB' = addMultToArgs core.ty argB
-                poly = PolyLambda fix polyB argB' env body
-            withPolyLambda sv.var poly $ specExpr t2
-      _ -> fmap sf $ LetSF sv <$> specExpr t1 <*> specExpr t2
-    LamCF fix [] argB env body -> do
-      let argB' = addMultToArgs core.ty argB
-      mvar <- storeLambda fix argB' env body
-      pure $ sf $ ClosureSF mvar env
-    LamCF _ polyB _ _ _ -> error "Should be caught by MustSpec at start"
-  where sf = SpecIR core.ty core.span
+      LocalVarCF v -> lookupLocalFun v >>= \case
+        Just _ -> sf <$> specLocalFun v []
+        Nothing -> pure $ sf $ VarSF v
+      RefCF v -> pure $ sf $ RefSF v
+      CopyCF v -> pure $ sf $ CopySF v
+      DropCF sv ty t1 -> fmap sf $ DropSF sv ty <$> specExpr t1
+      LiteralCF lit -> pure $ sf $ LiteralSF lit
+      ConCF dt v -> sf <$> specDataCon dt v span core.ty [] []
+      AppTmCF t1 args -> do
+        case t1.coref of
+          -- Because we want to immediately invoke appropriate constructors
+          -- we do this.
+          AppTyCF (Core _ conSpan (ConCF dt conVar)) tyArgs -> do
+            args' <- traverse specExpr args
+            sf <$> specDataCon dt conVar conSpan t1.ty tyArgs args'
+          ConCF dt conVar -> do
+            args' <- traverse specExpr args
+            sf <$> specDataCon dt conVar t1.span t1.ty [] args'
+          _ -> do
+            t1' <- specExpr t1
+            args' <- traverse specExpr args
+            pure $ sf $ AppSF t1' args'
+      AppTyCF t1 tys -> case t1.coref of
+        ConCF dt var -> sf <$> specDataCon dt var span core.ty tys []
+          -- mvar <- specDataType dt tys
+          -- pure $ sf $ ConSF mvar var
+        -- Recursive functions should be picked up here as well.
+        LocalVarCF v -> sf <$> specLocalFun v tys
+        ModuleVarCF v -> do
+          mvar <- specFunDef v tys
+          pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
+        LamCF fix polyB argB env body -> throwError $ NoImmediateSpec span
+        -- NOTE: how do we handle trying to specialize a reference?
+        -- I think that's automatically rejected?
+        _ -> error "Can't specialize this? Not certain if this can happen."
+      CaseCF t1 branches -> fmap sf $ CaseSF <$>
+        specExpr t1 <*> traverse (traverse specExpr) branches
+      LetCF sv t1 t2 -> case t1.coref of
+        LamCF fix polyB argB env body
+          | polyB /= [] -> do
+              let argB' = addMultToArgs core.ty argB
+                  poly = PolyLambda fix polyB argB' env body
+              withPolyLambda sv.var poly $ specExpr t2
+        _ -> fmap sf $ LetSF sv <$> specExpr t1 <*> specExpr t2
+      LamCF fix [] argB env body -> do
+        let argB' = addMultToArgs core.ty argB
+        mvar <- storeLambda fix argB' env body
+        pure $ sf $ ClosureSF mvar env
+      LamCF _ polyB _ _ _ -> error "Should be caught by MustSpec at start"
+  sf = SpecIR core.ty core.span
 
 -- | Generate a fresh lambda name using `lambdaCounter`
 -- and the types used to specialize it.

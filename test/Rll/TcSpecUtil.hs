@@ -105,32 +105,37 @@ checkTo tmTxt tyTxt = buildChecker f tmTxt tyTxt where
 -- We don't check that the types are equal because we haven't corrected
 -- the type variable indices in `Tm`.
 compareCoreToTm :: Core -> Tm -> Maybe (Core, Tm)
-compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf} = case (core, tmf) of
-  -- Core has no anno so we skip it
-  (_, Anno t1 ty) -> compareCoreToTm fullCore t1
-  (CaseCF c1 cb, Case t1 tb) -> compareCoreToTm c1 t1 <|>
-    allBranches cb tb
-  (LetStructCF cCon cVars c1 c2, LetStruct tCon tVars t1 t2) ->
-    cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
-    <|> compareCoreToTm c2 t2
-  (LetCF cv c1 c2, Let tv t1 t2) -> cv #= tv
-    <|> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
-  (LamCF cFix cPolys cArgs _ c1,
-   FunTm tFix tPolys tArgs t1) -> tFix #= cFix <|> compareCoreToTm c1 t1
-  (ModuleVarCF cv, TmVar tv) -> cv #= tv
-  (LocalVarCF cv, TmVar tv) -> cv #= tv
-  (ConCF _ cv, TmCon tv) -> cv #= tv
-  (CopyCF cv, Copy tv) -> cv #= tv
-  (RefCF cv, RefTm tv) -> cv #= tv
-  (AppTyCF c1 _, AppTy t1 _) -> compareCoreToTm c1 t1
-  (DropCF cv _ c1, Drop tv t1) -> cv #= tv <|> compareCoreToTm c1 t1
-  (AppTmCF c1 cs, _) ->
-    let (ts, t1) = collectApps tm
-    in compareCoreToTm c1 t1
-      <|> asum (zipWith compareCoreToTm cs $ reverse ts)
-  (LiteralCF cl, LiteralTm tl) -> cl #= tl
-  _ -> err
+compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf}
+  | isLt cTy = err
+  | otherwise = case (core, tmf) of
+    -- Core has no anno so we skip it
+    (_, Anno t1 ty) -> compareCoreToTm fullCore t1
+    (CaseCF c1 cb, Case t1 tb) -> compareCoreToTm c1 t1 <|>
+      allBranches cb tb
+    (LetStructCF cCon cVars c1 c2, LetStruct tCon tVars t1 t2) ->
+      cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
+      <|> compareCoreToTm c2 t2
+    (LetCF cv c1 c2, Let tv t1 t2) -> cv #= tv
+      <|> compareCoreToTm c1 t1 <|> compareCoreToTm c2 t2
+    (LamCF cFix cPolys cArgs _ c1,
+     FunTm tFix tPolys tArgs t1) -> tFix #= cFix <|> compareCoreToTm c1 t1
+    (ModuleVarCF cv, TmVar tv) -> cv #= tv
+    (LocalVarCF cv, TmVar tv) -> cv #= tv
+    (ConCF _ cv, TmCon tv) -> cv #= tv
+    (CopyCF cv, Copy tv) -> cv #= tv
+    (RefCF cv, RefTm tv) -> cv #= tv
+    (AppTyCF c1 _, AppTy t1 _) -> compareCoreToTm c1 t1
+    (DropCF cv _ c1, Drop tv t1) -> cv #= tv <|> compareCoreToTm c1 t1
+    (AppTmCF c1 cs, _) ->
+      let (ts, t1) = collectApps tm
+      in compareCoreToTm c1 t1
+        <|> asum (zipWith compareCoreToTm cs $ reverse ts)
+    (LiteralCF cl, LiteralTm tl) -> cl #= tl
+    _ -> err
   where
+  isLt Ty{tyf=LtOf _} = True
+  isLt Ty{tyf=LtJoin _} = True
+  isLt _ = False
   err = Just (fullCore, tm)
   collectApps t = case t.tmf of
     AppTm t1 t2 -> let (ls, tf) = collectApps t1 in (t2:ls, tf)

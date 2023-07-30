@@ -21,6 +21,7 @@ import Data.Aeson (FromJSON, ToJSON, ToJSONKey)
 import Data.Aeson qualified as A
 import Data.Aeson.Types qualified as AT
 import GHC.Generics
+import GHC.Stack
 
 data SpecF a
   = CaseSF a [CaseBranch a]
@@ -201,22 +202,31 @@ instance Hashable MVar where
 mvarToText :: MVar -> Text
 mvarToText (MVar v slug) = T.concat [v.name, "%", slug]
 
-mangleType :: Ty -> Text
-mangleType Ty{tyf} = case mangleType <$> tyf of
-  TyVar tv -> notConcrete
-  Univ _ _ _ _ _ -> notConcrete
-  LtOf _ -> notReachLt
-  LtJoin _ -> notReachLt
-  TyApp a b -> T.concat [a, "(", b, ")"]
-  TyCon v -> v.name
-  RefTy _ a -> T.concat ["[", a, "]"]
-  FunTy _ a _ b -> T.concat ["{", a, "-", b, "}"]
-  where
-    notReachLt = error "Should never reach a lifetime when mangling"
-    notConcrete = error "Cannot mangle a non-concrete type"
+mangleType :: HasCallStack => Ty -> Text
+mangleType startTy@Ty{tyf} = go startTy where
+  go ty@Ty{tyf} = case tyf of
+    TyVar tv -> notConcrete
+    Univ _ _ _ _ _ -> notConcrete
+    LtOf _ -> notReachLt
+    LtJoin _ -> notReachLt
+    TyApp a b -> case b.tyf of
+      LtOf _ -> mangleType a
+      LtJoin _ -> mangleType a
+      _ -> T.concat [mangleType a, "(", mangleType b, ")"]
+    TyCon v -> v.name
+    RefTy _ a -> T.concat ["[", mangleType a, "]"]
+    FunTy _ a _ b -> T.concat ["{", mangleType a, "-", mangleType b, "}"]
+    where
+    notReachLt = error $ "Should never reach a lifetime when mangling: " <> show ty <> " in " <> show startTy
+    notConcrete = error $ "Cannot mangle a non-concrete type: " <> show ty <> " in " <> show startTy
 
 mangleTypes :: [Ty] -> Text
-mangleTypes tys = T.intercalate "," $ mangleType <$> tys
+mangleTypes tys = T.intercalate "," $ mangleType <$> tys' where
+  tys' = filter f tys
+  f Ty{tyf} = case tyf of
+    LtOf _ -> False
+    LtJoin _ -> False
+    _ -> True
 
 mangleDataType :: Text -> [Ty] -> MVar
 mangleDataType dtName tys = MVar (Var dtName) $ mangleTypes tys
