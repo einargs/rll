@@ -299,6 +299,8 @@ Later optimizations
 # Future Tests
 Future tests.
 
+- [ ] Test that runs spec on everything and makes sure there's at least one specialized version
+  for all core declarations? No, that would need a `main` function. Something like it.
 - [ ] Write some tests for the functionality of `toRef` -- i.e. pattern matching on a reference
   to a datatype and getting the original type for members that are already references. I want to
   make sure the borrow count stuff works right.

@@ -127,6 +127,7 @@ typeSubInArgs subTys args = zip3 vars (applyTypeParams subTys tys) mults where
 -- it.
 guardDecl :: MVar -> Spec SpecDecl -> Spec MVar
 guardDecl mvar act = do
+  D.traceM $ "guard decl: " <> show mvar
   specDecls <- gets (.specDecls)
   case M.lookup mvar specDecls of
     Just _ -> pure ()
@@ -139,21 +140,25 @@ guardDecl mvar act = do
 lookupLocalFun :: Var -> Spec (Maybe LocalFun)
 lookupLocalFun v = M.lookup v <$> gets (.localFuns)
 
+-- | Specialize a type if it's a data type.
+specTy :: Ty -> Spec ()
+specTy ty = case parseTyCon ty of
+  Nothing -> pure ()
+  Just (v, args) -> do
+    cdt <- lookupCoreDataType v
+    void $ specDataType cdt args
+
 -- | Specializes a data type and registers it under the mangled name.
 --
 -- Only does so once.
 specDataType :: DataType -> [Ty] -> Spec MVar
-specDataType dt tyArgs = guardDecl name $ SpecDataType <$> specDt
+specDataType dt tyArgs = do
+  D.traceM $ "spec data type: " <> show name
+  guardDecl name $ SpecDataType <$> specDt
   where
   name = mangleDataType (getDataTypeName dt) tyArgs
-  specTy :: Ty -> Spec ()
-  specTy ty = case parseTyCon ty of
-    Nothing -> pure ()
-    Just (v, args) -> do
-      cdt <- lookupCoreDataType v
-      void $ specDataType cdt args
   specDt = case dt of
-    -- TODO: loop over the member types and specialize them too.
+    -- TODO (?): loop over the member types and specialize them too.
     EnumType name tyParams cases _ -> do
       let cases' = applyTypeParams tyArgs <$> cases
       forM_ cases' $ traverse_ specTy
@@ -166,12 +171,18 @@ specDataType dt tyArgs = guardDecl name $ SpecDataType <$> specDt
       BuiltInI64 -> assert (tyArgs == []) $ SpecI64
       BuiltInString -> assert (tyArgs == []) $ SpecString
 
+-- | Lookup an already specialized data type.
 lookupSpecDataType :: MVar -> Spec SpecDataType
 lookupSpecDataType v = do
   specDecls <- gets (.specDecls)
   case M.lookup v specDecls of
     Just (SpecDataType dt) -> pure dt
     _ -> throwError $ NoSpecDataType v
+
+-- | Function to call on all function arguments to make sure the specialized versions
+-- are generated.
+specFunArgs :: [(SVar, Ty, Mult)] -> Spec ()
+specFunArgs = traverse_ \(_, ty, _) -> specTy ty
 
 -- | Calculate the tag value for an enum constructor.
 tagValueFor :: Var -> M.HashMap T.Text [Ty] -> Integer
@@ -326,6 +337,7 @@ addSpecDecl mvar sd = modify' \ctx -> ctx
 -- | Store a non-polymorphic lambda in `specDecls`.
 storeLambda :: Maybe SVar -> [(SVar, Ty, Mult)] -> ClosureEnv -> Core -> Spec MVar
 storeLambda fix args env body = do
+  specFunArgs args
   name <- freshLambdaName []
   let wrap = case fix of
         Just recName -> withLocalFun recName.var (MonoLF name recName.var)
@@ -379,6 +391,7 @@ specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
       guardDecl name do
         let bodyCore' = typeSubInCore tyArgs bodyCore
             argB' = typeSubInArgs tyArgs argB
+        specFunArgs argB'
         body <- specExpr bodyCore'
         pure $ SpecFun env fix argB' body
       pure $ ClosureSF name env
@@ -394,6 +407,7 @@ specFunDef name tyArgs = guardDecl mangledName do
     } <- get
   modify' \ctx -> ctx{ localFuns=M.empty, enclosingFun=mangledName }
   (fix, args, coreBody) <- getBody <$> getCoreFun name
+  specFunArgs args
   body <- specExpr coreBody
   modify' \ctx -> ctx
     { localFuns = entryLocals

@@ -33,6 +33,17 @@ willGen txt = do
 spec :: Spec
 spec = do
   describe "generate llvm" do
+    it "generates an id function" do
+      willGen [txt|
+        struct U2 {}
+        struct Unit {}
+
+        thing : U2 -M[]> U2
+        = \ u -> u;
+
+        main : Unit -M[]> Unit
+        = \u -> u;
+        |]
     it "simple bool" do
       willGen [txt|
         enum Bool = True | False;

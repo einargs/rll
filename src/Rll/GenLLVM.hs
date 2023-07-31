@@ -598,7 +598,8 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
           let stackArgsTy' = D.trace "stack args ty" stackArgsTy
               gepIdx = D.trace "stack args idx" $ IR.int32 1
               stackArgs' = D.trace "stack args" stackArgs
-          restArgsPtr <- IR.gep stackArgsTy' stackArgs' [gepIdx] `named` "restArgsPtr"
+              restArgsPtr = stackArgs
+          -- restArgsPtr <- IR.gep stackArgsTy' stackArgs' [gepIdx] `named` "restArgsPtr"
           let argsLeftOp = IR.int32 $ argsLeft
           restArgsCount <- IR.sub stackArgCount argsLeftOp `named` "restArgCount"
           -- We call the returned function value, which stores the result in the return
@@ -648,8 +649,8 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
 
 -- | Build name for the recursive context from the
 -- recursive function variable name.
-mkRecContextName :: Var -> A.Name
-mkRecContextName (Var txt) = A.Name $ textToSBS $ txt <> ".context"
+mkRecContextVar :: Var -> Var
+mkRecContextVar (Var txt) = Var $ txt <> ".context"
 
 -- | Introduce a new local variable.
 --
@@ -677,8 +678,12 @@ introVar var value = do
 localVarName :: Var -> BuildIR A.Name
 localVarName (Var txt) = do
   usedNames <- IR.liftIRState $ gets IR.builderUsedNames
+  D.traceM $ "used names: " <> show usedNames
   let rawName = textToSBS txt
-      nameCount = fromMaybe 0 $ Map.lookup rawName usedNames
+      nameCount = case Map.lookup rawName usedNames of
+        Nothing -> error $ "Variable " <> show txt <> " had not been used."
+        -- We subtract one because the state stores the next unused index.
+        Just count -> count - 1
       name = rawName <> fromString ("_" <> show nameCount)
   pure $ A.Name name
 
@@ -722,8 +727,8 @@ genIR cenvTy = go where
       closurePtr <- buildClosurePtr [cenvOp]
       buildFunValueFor funMVar closurePtr
     RecClosureSF funMVar contextVar -> do
-      let cenvName = mkRecContextName contextVar
-          cenvOp = A.LocalReference cenvTy $ cenvName
+      cenvName <- localVarName $ mkRecContextVar contextVar
+      let cenvOp = A.LocalReference cenvTy cenvName
       closurePtr <- buildClosurePtr [cenvOp]
       buildFunValueFor funMVar closurePtr
     AppSF funExpr args -> do
@@ -733,8 +738,8 @@ genIR cenvTy = go where
           cenvOp <- buildClosureEnv cenv
           knownCall funMVar cenvOp argOps
         RecClosureSF funMVar contextVar -> do
-          let cenvName = mkRecContextName contextVar
-              cenvOp = A.LocalReference cenvTy $ cenvName
+          cenvName <- localVarName $ mkRecContextVar contextVar
+          let cenvOp = A.LocalReference cenvTy cenvName
           knownCall funMVar cenvOp argOps
         _ -> do
           let retTy = opaqueTypeFor expr.ty
@@ -842,10 +847,11 @@ genFun funMVar cenv mbFix params body = do
       -- DT.traceM $ "!body.ty: " <> show body.ty
       fastRetTy <- toLlvmType body.ty
       ctxTy <- closureEnvToType cenv
-      llvmParams <- traverse mkLlvmParam params
-      let ctxOp = A.LocalReference ctxTy contextName
-      (_, fastBlocks) <- runBuildIR do
+      ((ctxName, argNames), fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
+        ctxName' <- mkCtxName
+        argNames' <- traverse (\(svar, _, _) -> introVarName svar.var) params
+        let ctxOp = A.LocalReference ctxTy ctxName'
         case mbFix of
           Nothing -> pure ()
           Just SVar{var} -> do
@@ -853,7 +859,9 @@ genFun funMVar cenv mbFix params body = do
             error "TODO create function value that calls this function and store it"
         extractClosureEnv cenv ctxOp
         genIR ctxTy body
-      let fastParams = (A.Parameter ctxTy contextName []):llvmParams
+        pure (ctxName', argNames')
+      llvmParams <- sequence $ zipWith mkLlvmParam argNames paramTys
+      let fastParams = (A.Parameter ctxTy ctxName []):llvmParams
           fastName = mvarToName $ mangleFastFun funMVar
           fastDef = baseFunctionDefaults
             { AG.name = fastName
@@ -862,19 +870,23 @@ genFun funMVar cenv mbFix params body = do
             , AG.returnType = fastRetTy
             }
           llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
+      D.traceM $ "fastParams: " <> show fastParams
       emitDefn $ A.GlobalDefinition fastDef
       genEntryFun funMVar body.ty fastRetTy llvmArgTys
       let closureInfo = ClosureInfo fastRetTy llvmArgTys
       addClosureInfo funMVar closureInfo
       pure closureInfo
   where
-  contextName = case mbFix of
-    Nothing -> A.Name "nothing.context"
-    Just svar -> mkRecContextName svar.var
-  mkLlvmParam (svar, ty, _) = do
+  paramTys = params <&> \(_,ty,_) -> ty
+  mkCtxName :: BuildIR A.Name
+  mkCtxName = do
+    let baseVar = maybe (Var "emptyCtx") (.var) mbFix
+        ctxVar = mkRecContextVar baseVar
+    introVarName ctxVar
+  mkLlvmParam name ty = do
     DT.traceM $ "!param ty: " <> show ty
     ty' <- toLlvmType ty
-    pure $ A.Parameter ty' (varToName svar.var) []
+    pure $ A.Parameter ty' name []
 
 -- | Declare the external functions for all the important calls like malloc.
 llvmDeclarations :: Gen ()
@@ -903,7 +915,9 @@ freePtr ptrVal = do
 -- | Generate llvm IR for the declaration.
 genDecl :: MVar -> SpecDecl -> Gen ()
 genDecl mvar decl = case decl of
-  SpecDataType sdt -> void $ genType mvar sdt
+  SpecDataType sdt -> do
+    D.traceM $ "Generating type: " <> show mvar
+    void $ genType mvar sdt
   SpecFun cenv mbFix args bodyIR -> void $ genFun mvar cenv mbFix args bodyIR
 
 -- | Generate a list of LLVM definitions.
@@ -929,6 +943,7 @@ runGen specDeclMap specDecls llvmCtx dl = do
             specDecls' = reverse specDecls
             tyDecls = filter isTyDecl specDecls'
             funDecls = filter (not . isTyDecl) specDecls'
+        D.traceM $ "decls: " <> show specDeclMap
         traverse_ (uncurry genDecl) $ tyDecls
         traverse_ (uncurry genDecl) $ funDecls
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act
