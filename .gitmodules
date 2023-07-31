@@ -1,0 +1,4 @@
+[submodule "llvm-hs"]
+	path = llvm-hs
+	url = https://github.com/llvm-hs/llvm-hs.git
+	branch = llvm-15
