@@ -33,6 +33,15 @@ willGen txt = do
 spec :: Spec
 spec = do
   describe "generate llvm" do
+    it "simple bool" do
+      willGen [txt|
+        enum Bool = True | False;
+
+        main : Bool -M[]> Bool
+        = \b -> case b of
+        | True -> False
+        | False -> True;
+        |]
     it "can run" do
       willGen [txt|
         struct Unit {}
@@ -51,8 +60,10 @@ spec = do
 
         enum Two = Left L | Right R;
 
-        main : Two
-        = let tup = Tuple [L] [R] L (R Unit Unit) in
+        main : Unit -M[]> Two
+        = \arg ->
+        let Unit = arg in
+        let tup = Tuple [L] [R] L (R Unit Unit) in
         let destroyL = \(l:L) -> let L = l in Unit in
         let v = Right (extractRight ['destroyL] [L] [R] &destroyL tup) in
         drop destroyL in v;

@@ -141,6 +141,7 @@ Spec tests
 - [ ] the mems is getting swapped for SpecStruct.
 - [ ] I want to go through and make the representation for a reference to a multi-use function just
   a `funVal` struct.
+- [ ] I need to deal with functions that don't take any arguments for generating entry blocks.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.

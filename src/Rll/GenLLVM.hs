@@ -314,9 +314,6 @@ emitLlvmType :: MVar -> A.Type -> Gen ()
 emitLlvmType mvar ty = do
   D.traceM $ "adding type " <> show mvar <> " is " <> show ty
   void $ typedef (mvarToName mvar) (Just ty)
-  -- TODO: remove
-  -- test <- typeForName (mvarToName mvar)
-  -- D.traceM $ "stored: " <> show test
 
 -- | Generate and emit the type if it doesn't already exist.
 --
@@ -465,7 +462,11 @@ knownCall funMVar cenvOp argOps = do
 
 -- | Use `GEP` to index into a field of a struct in a pointer.
 indexStructPtr :: A.Type -> A.Operand -> Integer -> BuildIR A.Operand
-indexStructPtr ty ptr idx = IR.gep ty ptr [IR.int32 0, IR.int32 idx]
+indexStructPtr ty ptr idx = do
+  val <- IR.gep ty ptr [i0, idx']
+  pure $ D.trace ("completed GEP " <> show idx <> " ty " <> show ty) val
+  where i0 = D.trace "indexStructPtr GEP" $ IR.int32 0
+        idx' = D.trace ("indexStructPtr idx GEP " <> show idx) $ IR.int32 idx
 
 -- | Generate the closure type and the structure of the pushed args
 -- on the stack for the number of already applied arguments and
@@ -532,15 +533,10 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
     -- this is the number of already applied arguments stored in our
     -- closure.
     closureArgCount <- IR.load A.i32 oldClosurePtr 1 `named` "closureArgCount"
-    let impos' = D.trace (show funMVar <> " referencing impos") impos
-    IR.switch closureArgCount impos' jumps
+    IR.switch closureArgCount impos jumps
 
     impos <- IR.block `named` "impossible1"
     IR.unreachable
-    D.traceM $ "generated " <> show impos <> " for " <> show funMVar
-    -- addr <- IR.alloca fastRetTy Nothing 1
-    -- val <- IR.load fastRetTy addr 1
-    -- IR.ret val
 
     -- All closures will have a context argument stored in them,
     -- even if that context argument is a zero width type.
@@ -599,7 +595,10 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
           -- we use GEP to calculate the right offset and then
           -- generate the calling code with the remaining arguments
           -- and offset stack pointer.
-          restArgsPtr <- IR.gep stackArgsTy stackArgs [IR.int32 1] `named` "restArgsPtr"
+          let stackArgsTy' = D.trace "stack args ty" stackArgsTy
+              gepIdx = D.trace "stack args idx" $ IR.int32 1
+              stackArgs' = D.trace "stack args" stackArgs
+          restArgsPtr <- IR.gep stackArgsTy' stackArgs' [gepIdx] `named` "restArgsPtr"
           let argsLeftOp = IR.int32 $ argsLeft
           restArgsCount <- IR.sub stackArgCount argsLeftOp `named` "restArgCount"
           -- We call the returned function value, which stores the result in the return
@@ -618,8 +617,6 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
       pure $ (A.Int 32 $ fromInteger i, label)
     pure ()
   let entryBlockNames = entryBlocks <&> \(A.BasicBlock n _ _) -> n
-      entryBlocks' = entryBlocks <&> \(A.BasicBlock n a b) ->
-        A.BasicBlock (D.trace (show funMVar <> " block: " <> show n) n) a b
   D.traceM $ show funMVar <> " entryBlocks: " <> show entryBlockNames
   emitDefn $ A.GlobalDefinition $ baseFunctionDefaults
     { AG.name = mvarToName $ mangleEntryFun funMVar
@@ -629,7 +626,7 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
         , A.Parameter A.i32 "stackArgCount" []
         , A.Parameter A.ptr "returnPtr" []
         ], False)
-    , AG.basicBlocks = entryBlocks'
+    , AG.basicBlocks = entryBlocks
     , AG.returnType = funValueType
     }
   where
@@ -842,7 +839,7 @@ genFun funMVar cenv mbFix params body = do
     Just ci -> pure ci
     Nothing -> do
       -- DT.traceM $ "!body: " <> show body
-      DT.traceM $ "!body.ty: " <> show body.ty
+      -- DT.traceM $ "!body.ty: " <> show body.ty
       fastRetTy <- toLlvmType body.ty
       ctxTy <- closureEnvToType cenv
       llvmParams <- traverse mkLlvmParam params
@@ -927,5 +924,11 @@ runGen specDeclMap specDecls llvmCtx dl = do
       f = fmap \(_,ctx) -> SL.unSnocList $ ctx.moduleState.builderDefs
       act = do
         llvmDeclarations
-        traverse_ (uncurry genDecl) $ reverse specDecls
+        let isTyDecl (_, SpecDataType _) = True
+            isTyDecl _ = False
+            specDecls' = reverse specDecls
+            tyDecls = filter isTyDecl specDecls'
+            funDecls = filter (not . isTyDecl) specDecls'
+        traverse_ (uncurry genDecl) $ tyDecls
+        traverse_ (uncurry genDecl) $ funDecls
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act
