@@ -37,6 +37,16 @@
             # Required by spacemacs haskell layer
             apply-refact stylish-haskell hasktags hlint hoogle
           ]);
+       src = [
+         ./flake.nix
+         ./flake.lock
+        ];
+
+      unpackPhase = ''
+        for srcFile in $src; do
+          cp $srcFile $(stripHash $srcFile)
+        done
+      ''; 
       # Hack to make c stuff available to GHC
       # see: https://docs.haskellstack.org/en/stable/nix_integration/
       # LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [ zlib hPkgs.ghc ];
