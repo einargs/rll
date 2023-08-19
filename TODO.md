@@ -133,12 +133,21 @@ Spec tests
 - [ ] I need to deal with functions that don't take any arguments for generating entry blocks.
 - [ ] Change it so that instead of raw types we use more named types in the generated llvm and
   just do a little extra to calculate size of enums.
+  - So like cutting out `genType` in `toLlvmType` so that I don't have the difference between
+    `toLlvmType` and `toOpaqueType` getting in the way.
+  - Probably need to make sure that I generate all types first. Maybe have a pass where I calculate
+    type sizes for enums and store that instead of doing it dynamically. So I could break this phase
+    into two parts: type gen and code gen.
 - [ ] Make references to functions just raw function values.
 - [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
   has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
   functions into just standard function values since no need to know about that.
+  - What about a way to mark variables as either pointers to the stack or raw variables? Would
+    have caught some bugs. Build it into the variable generation and use?
 - [ ] Some `closureArg_0` blocks in `main%.entry` in `"takes a reference to a function as an argument"`
-  have no instructions in them.
+  have no instructions in them. Not sure if this is a problem.
+- [ ] I'm pretty sure that functions or function references in closure environments is going to cause
+  problems when determining whether they're on the stack or not via `Moved` and `Refd`.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.

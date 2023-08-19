@@ -236,9 +236,9 @@ tmpNullPtr = A.ConstantOperand $ A.Null $ A.ptr
 -- that I need to go in and tell it not to alloca FunValueTypes.
 -- | Get the closure pointer from the function value.
 getClosurePtr :: A.Operand -> BuildIR A.Operand
-getClosurePtr op = do
+getClosurePtr op = IR.extractValue op [0]
+  {- TODO: remove
   usedNames <- IR.liftIRState $ gets IR.builderUsedNames
-  DT.traceM $ "!! getClosurePtr.op: " <> show op <> "\n!!usedNames: " <> show usedNames
   let newOpType = A.NamedTypeReference "FunValueType" -- A.ArrayType 10 $ A.StructureType False []
       localRef = case op of
         A.LocalReference ty name | name == "uId_1" -> A.LocalReference newOpType name
@@ -249,6 +249,7 @@ getClosurePtr op = do
   pure tmpNullPtr
   -- IR.emitInstr A.ptr $ A.ExtractValue op [] []
   -- IR.extractValue op [0]
+  -}
 
 -- | Get the entry function pointer from the function value.
 getEntryFunPtr :: HasCallStack => A.Operand -> BuildIR A.Operand
@@ -300,8 +301,12 @@ prepareFunValue funMVar cenv cenvTy = do
   buildFunValueFor funMVar closurePtr
 
 -- TODO: documentation
+-- | Get the llvm representation of a RLL type.
+--
+-- Will call `genType` if it hasn't already been generated.
 toLlvmType :: HasCallStack => Ty -> Gen A.Type
 toLlvmType Ty{tyf=FunTy _ _ _ _} = pure funValueType
+toLlvmType Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = pure funValueType
 toLlvmType Ty{tyf=RefTy _ _} = pure A.ptr
 toLlvmType ty = do
   mvar <- case mvarForDataTy ty of
@@ -315,6 +320,15 @@ toLlvmType ty = do
       sdt <- lookupSpecDataType mvar
       genType mvar sdt
 
+-- | Get the llvm type representation of a RLL reference type.
+--
+-- Should only be called on types known to be references.
+typeForRef :: Ty -> A.Type
+typeForRef Ty{tyf=RefTy _ base} = case base.tyf of
+  FunTy _ _ _ _ -> funValueType
+  _ -> A.ptr
+typeForRef _ = error "given a non-reference type"
+
 -- | Normally when we convert a type to an LLVM type,
 -- we avoid using any opaque named types. This helps
 -- us when calculating the sizes of types for enums.
@@ -324,6 +338,7 @@ toLlvmType ty = do
 -- So instead we use an opaque type.
 opaqueTypeFor :: Ty -> A.Type
 opaqueTypeFor Ty{tyf=FunTy _ _ _ _} = funValueType
+opaqueTypeFor Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = funValueType
 opaqueTypeFor Ty{tyf=RefTy _ _} = A.ptr
 opaqueTypeFor ty = case mvarForDataTy ty of
   Nothing -> error "shouldn't be possible"
@@ -676,17 +691,6 @@ mkRecContextVar (Var txt) = Var $ txt <> ".context"
 introVarName :: Var -> BuildIR A.Name
 introVarName (Var txt) = IR.freshName $ textToSBS txt
 
--- | Takes a variable and a value and returns a pointer to
--- that value allocated on the stack.
-introVar :: Var -> A.Operand -> BuildIR A.Operand
-introVar var value = do
-  name <- introVarName var
-  t <- typeOf value
-  addNamedInstr name $ A.Alloca t Nothing 1 []
-  let loc = A.LocalReference A.ptr name
-  IR.store loc 1 value
-  pure loc
-
 -- | Get the latest version of a name.
 --
 -- This is a fairly hacky solution that relies on name shadowing
@@ -705,35 +709,70 @@ localVarName (Var txt) = do
       name = rawName <> fromString ("_" <> show nameCount)
   pure $ A.Name name
 
+-- | Load the raw value from the local variable without checking if
+-- it's a pointer that needs to be loaded from the stack.
+localVarRaw :: Var -> A.Type -> BuildIR A.Operand
+localVarRaw var llvmTy = do
+  name <- localVarName var
+  pure $ A.LocalReference llvmTy name
+
+-- | Assume that a local variable is a pointer to the stack and load
+-- it from memory.
+localVarLoad :: Var -> A.Type -> BuildIR A.Operand
+localVarLoad var llvmTy = do
+  name <- localVarName var
+  let varPtr = A.LocalReference A.ptr name
+  IR.load llvmTy varPtr 1
+
+-- | Whether a variable's true value is on the stack and the variable
+-- is just a pointer to that, or the variable is the actual value.
+data VarLoc = OnStack | InReg
+
 -- | A predicate determining whether a type is allocated
 -- on the stack or not.
-isOnStack :: Ty -> Bool
+isOnStack :: Ty -> VarLoc
 isOnStack ty = case ty.tyf of
-  FunTy _ _ _ _ -> True
-  RefTy _ _ -> False
-  _ -> True
+  FunTy _ _ _ _ -> InReg
+  RefTy _ _ -> InReg
+  _ -> OnStack
+
+-- | Takes a variable name and a value and returns an llvm
+-- variable holding either a pointer to the stack allocation
+-- of the value or the value itself.
+-- that value allocated on the stack if 
+introVar :: Var -> A.Operand -> BuildIR A.Operand
+introVar var value = do
+  name <- introVarName var
+  t <- typeOf value
+  -- TODO: convert this to check the RLL type to see if we need to allocate
+  -- on the stack or not.
+  addNamedInstr name $ A.Alloca t Nothing 1 []
+  let loc = A.LocalReference A.ptr name
+  IR.store loc 1 value
+  pure loc
 
 -- | Uses `localVarName` to build a local reference operand.
 --
+-- We use `isOnStack` to figure out from the Rll type whether or not
+-- the value is on the stack or in the raw variable.
 -- `onStack` indicates whether or not to load the variable from the
 -- stack. If it's true, the variable is a pointer to the passed type.
 -- If it's false, the variable is the passed type.
-localVarOp :: Var -> Bool -> A.Type -> BuildIR A.Operand
-localVarOp var onStack llvmTy = do
+localVarOp :: Var -> Ty -> A.Type -> BuildIR A.Operand
+localVarOp var varTy llvmTy = do
   name <- localVarName var
-  if onStack
-    then do
-      let varPtr = A.LocalReference A.ptr name
-      IR.load llvmTy varPtr 1
-    else do
-      pure $ A.LocalReference llvmTy name
+  case isOnStack varTy of
+    OnStack -> localVarLoad var llvmTy
+    InReg -> localVarRaw var llvmTy
 
 -- | Build a structure containing all free variables in a closure.
 buildClosureEnv :: ClosureEnv -> BuildIR A.Operand
 buildClosureEnv cenv = traverse go (M.toList cenv.envMap) >>= buildStructIR
   where
-  go (var, Moved ty) = localVarOp var True $ opaqueTypeFor ty
-  go (var, _) = localVarOp var False A.ptr
+  -- TODO: this is going to have a problem with function values
+  go (var, Moved ty) = localVarOp var ty $ opaqueTypeFor ty
+  go (var, Copied ty) = localVarRaw var $ typeForRef ty
+  go (var, Refd ty) = localVarRaw var $ typeForRef ty
 
 -- | Generate the LLVM IR for expressions.
 genIR :: A.Type -> SpecIR -> BuildIR A.Operand
@@ -746,8 +785,7 @@ genIR cenvTy = go where
       closurePtr <- buildClosurePtr [cenvOp]
       buildFunValueFor funMVar closurePtr
     RecClosureSF funMVar contextVar -> do
-      cenvName <- localVarName $ mkRecContextVar contextVar
-      let cenvOp = A.LocalReference cenvTy cenvName
+      cenvOp <- localVarRaw (mkRecContextVar contextVar) cenvTy
       closurePtr <- buildClosurePtr [cenvOp]
       buildFunValueFor funMVar closurePtr
     AppSF funExpr args -> do
@@ -758,8 +796,7 @@ genIR cenvTy = go where
           knownCall funMVar cenvOp argOps
         RecClosureSF funMVar contextVar -> do
           argOps <- traverse go args
-          cenvName <- localVarName $ mkRecContextVar contextVar
-          let cenvOp = A.LocalReference cenvTy cenvName
+          cenvOp <- localVarRaw (mkRecContextVar contextVar) cenvTy
           knownCall funMVar cenvOp argOps
         _ -> do
           let retTy = opaqueTypeFor expr.ty
@@ -767,22 +804,17 @@ genIR cenvTy = go where
               isDropped = case funExpr.ty.tyf of
                 FunTy _ _ _ _ -> True
                 _ -> False
-          funValRaw <- go funExpr
+          funVal <- go funExpr
           argOps <- traverse go args
-          funVal <- case funExpr.ty.tyf of
-            FunTy _ _ _ _ -> pure funValRaw
-            RefTy _ Ty{tyf=FunTy _ _ _ _} -> IR.load funValueType funValRaw 1
-            _ -> error "should only be a function or function ref"
           result <- funValCall retTy funVal argOps
           when isDropped $ freeClosurePtrIn funVal
           pure result
-    VarSF var -> localVarOp var (isOnStack expr.ty) $ opaqueTypeFor expr.ty
-    CopySF var -> localVarOp var False A.ptr
+    VarSF var -> localVarOp var expr.ty $ opaqueTypeFor expr.ty
+    CopySF var -> localVarRaw var $ typeForRef expr.ty
     DropSF svar varTy body -> do
       case varTy.tyf of
         FunTy Many _ _ _ -> do
-          varOp <- localVarOp svar.var True funValueType
-          -- NOTE the error is triggered here.
+          varOp <- localVarRaw svar.var funValueType
           freeClosurePtrIn varOp
         RefTy _ _ -> pure ()
         _ -> error "shouldn't be able to drop this"
@@ -793,7 +825,7 @@ genIR cenvTy = go where
       -- NOTE: in the future I can probably use the lifetime intrinsics to
       -- start and end the alloc lifetime around `go t2`.
       go t2
-    RefSF var -> localVarOp var False A.ptr
+    RefSF var -> localVarRaw var $ typeForRef expr.ty
     StructConSF dtMVar args -> traverse go args >>= buildStructIR
     EnumConSF tagValue dtMVar conVar args -> do
       let rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar
@@ -832,6 +864,9 @@ genIR cenvTy = go where
         conVal <- IR.load conTy enumLoc 1
         forM_ (zip [0..] memSVars) \(i, SVar{var}) -> do
           mem <- IR.extractValue conVal [i]
+          -- TODO: I think I'm going to need to add info about the enum types to the branch?
+          -- Yeah, change up `CaseBranch` for something where the memSVars are paired with their
+          -- RLL type. Actually this maybe needs to be backpropagated to the Core IR as well.
           introVar var mem
         conResult <- go body
         IR.br caseEnd
@@ -873,7 +908,7 @@ genFun funMVar cenv mbFix params body = do
       llvmParamTys <- traverse toLlvmType paramTys
       (allArgNames, fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
-        (ctxName, ctxOp) <- introArg contextVar ctxTy False
+        (ctxName, ctxOp) <- introArg contextVar ctxTy InReg
         (argNames, _) <- fmap unzip $ sequence $ zipWith3 introArg paramVars llvmParamTys $ isOnStack <$> paramTys
         case mbFix of
           Nothing -> pure ()
@@ -899,16 +934,16 @@ genFun funMVar cenv mbFix params body = do
       addClosureInfo funMVar closureInfo
       pure closureInfo
   where
-  -- | Introduce a function argument. Takes a boolean indicating whether or not
-  -- we need to store it on the stack so that it can be accessed by reference.
-  introArg :: Var -> A.Type -> Bool -> BuildIR (A.Name, A.Operand)
-  introArg var ty onStack = do
+  -- | Introduce a function argument.
+  introArg :: Var -> A.Type -> VarLoc -> BuildIR (A.Name, A.Operand)
+  introArg var llvmTy varLoc = do
     name <- introVarName var
-    let argRef = A.LocalReference ty name
+    let argRef = A.LocalReference llvmTy name
     -- We need to store it on the stack so that it can have references
     -- taken in the function body.
-    when onStack $ void $ introVar var argRef
-    DT.traceM $ "introArg: " <> show name <> " " <> show ty <> " " <> (if onStack then "on stack" else "in register")
+    case varLoc of
+      OnStack -> void $ introVar var argRef
+      InReg -> pure ()
     pure (name, argRef)
   (paramVars, paramTys) = unzip $ params <&> \(svar, ty, _) -> (svar.var, ty)
   contextVar = mkRecContextVar $ maybe (Var "emptyCtx") (.var) mbFix
