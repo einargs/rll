@@ -129,19 +129,16 @@ Spec tests
   automatically promote the alignment based on the stack alignment.
 - [ ] Write a nice helper for building manual functions. Defining all the entry function args
   separate in `genFun` is annoying.
-- [ ] Instead of saturated and unsaturated entry functions, what I'll do is have the entry
-  function take a stack allocated pointer that I'll write the return value to.
-- I could write an llvm function that calls the entry function with the correct number of args
-  on the stack based on a number in the closure ptr that says how many it can still accept.
-  The entry function would return a raw union of a function value and the return type that this
-  function would know how to interpret and cast based on info. Then it would loop over that
-  part until it had called everything.
-  - I think this is basically the worst parts of eval/apply and push/enter.
 - [ ] Eventually I should list the tags for different enums constructors as part of the data type.
-- [ ] the mems is getting swapped for SpecStruct.
-- [ ] I want to go through and make the representation for a reference to a multi-use function just
-  a `funVal` struct.
 - [ ] I need to deal with functions that don't take any arguments for generating entry blocks.
+- [ ] Change it so that instead of raw types we use more named types in the generated llvm and
+  just do a little extra to calculate size of enums.
+- [ ] Make references to functions just raw function values.
+- [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
+  has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
+  functions into just standard function values since no need to know about that.
+- [ ] Some `closureArg_0` blocks in `main%.entry` in `"takes a reference to a function as an argument"`
+  have no instructions in them.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -501,3 +498,7 @@ Thoughts about various future features.
 - My type substitution code is horrifically inefficient. If there's a slowdown, look over there.
   - Especially note the way that when I do it on `Core` it means that there's no more sharing of `Ty` objects
     in `Core` stuff.
+
+# Papers
+- Paper about calling conventions in lazy languages and an IR for it.
+  https://www.microsoft.com/en-us/research/wp-content/uploads/2016/08/tacc-hs09.pdf

@@ -24,7 +24,6 @@ import Data.Foldable (traverse_, foldlM)
 import Data.Functor (($>), (<&>))
 import Data.List (zip4, sortBy)
 import GHC.Stack (HasCallStack)
-import Debug.Trace qualified as D
 import Control.Exception (assert)
 import Data.Maybe (fromMaybe, fromJust)
 import Data.String (fromString)
@@ -52,6 +51,7 @@ import LLVM.AST.Instruction qualified as A
 import LLVM.AST.Constant qualified as A
 import LLVM.AST qualified as A
 import LLVM.AST.Type qualified as A
+import LLVM.AST.AddrSpace qualified as A
 
 -- TODO: I should look at why I never actually use the information stored in this.
 
@@ -222,11 +222,33 @@ typeOf arg = AT.typeOf arg <&> \case
 -- | This is the closure pointer and then the entry function
 -- pointer.
 funValueType :: A.Type
-funValueType = A.StructureType False [A.ptr, A.ptr]
+funValueType = A.NamedTypeReference "FunValueType"
 
+tmpNullPtr = A.ConstantOperand $ A.Null $ A.ptr
+
+-- NOTE: We've isolated the problem to getClosurePtr and getEntryFunPtr
+-- It looks like the problem is that checkGEPType fails on the type produced by the call to
+-- getIndexedType at line 2559 here: https://llvm.org/doxygen/Instructions_8h_source.html
+-- Okay. We've figured out the problem is that uId_1 is an alloca and not a structure in
+-- registers. So I'm going to have to figure out how that's happening. I think the alloca
+-- happens bc arguments get alloca'd, but I don't know how the operand has the wrong type.
+-- Maybe it's from manually emitting instructions? Right, I alloca all args, but I forgot
+-- that I need to go in and tell it not to alloca FunValueTypes.
 -- | Get the closure pointer from the function value.
 getClosurePtr :: A.Operand -> BuildIR A.Operand
-getClosurePtr op = IR.extractValue op [0]
+getClosurePtr op = do
+  usedNames <- IR.liftIRState $ gets IR.builderUsedNames
+  DT.traceM $ "!! getClosurePtr.op: " <> show op <> "\n!!usedNames: " <> show usedNames
+  let newOpType = A.NamedTypeReference "FunValueType" -- A.ArrayType 10 $ A.StructureType False []
+      localRef = case op of
+        A.LocalReference ty name | name == "uId_1" -> A.LocalReference newOpType name
+        _ -> op
+      -- testStruct = IR.struct (Just "FunValueType") False [A.Null A.ptr, A.Null A.ptr]
+  -- IR.emitInstr A.ptr $ A.ExtractValue testStruct [0] []
+  void $ IR.extractValue op [0]
+  pure tmpNullPtr
+  -- IR.emitInstr A.ptr $ A.ExtractValue op [] []
+  -- IR.extractValue op [0]
 
 -- | Get the entry function pointer from the function value.
 getEntryFunPtr :: HasCallStack => A.Operand -> BuildIR A.Operand
@@ -312,7 +334,7 @@ opaqueTypeFor ty = case mvarForDataTy ty of
 -- Convenience wrapper for `emitDefn`.
 emitLlvmType :: MVar -> A.Type -> Gen ()
 emitLlvmType mvar ty = do
-  D.traceM $ "adding type " <> show mvar <> " is " <> show ty
+  DT.traceM $ "adding type " <> show mvar <> " is " <> show ty
   void $ typedef (mvarToName mvar) (Just ty)
 
 -- | Generate and emit the type if it doesn't already exist.
@@ -464,9 +486,9 @@ knownCall funMVar cenvOp argOps = do
 indexStructPtr :: A.Type -> A.Operand -> Integer -> BuildIR A.Operand
 indexStructPtr ty ptr idx = do
   val <- IR.gep ty ptr [i0, idx']
-  pure $ D.trace ("completed GEP " <> show idx <> " ty " <> show ty) val
-  where i0 = D.trace "indexStructPtr GEP" $ IR.int32 0
-        idx' = D.trace ("indexStructPtr idx GEP " <> show idx) $ IR.int32 idx
+  pure $ DT.trace ("GEP value accessed " <> show idx <> " ty " <> show ty) val
+  where i0 = DT.trace "indexStructPtr GEP" $ IR.int32 0
+        idx' = DT.trace ("indexStructPtr idx GEP " <> show idx) $ IR.int32 idx
 
 -- | Generate the closure type and the structure of the pushed args
 -- on the stack for the number of already applied arguments and
@@ -533,9 +555,9 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
     -- this is the number of already applied arguments stored in our
     -- closure.
     closureArgCount <- IR.load A.i32 oldClosurePtr 1 `named` "closureArgCount"
-    IR.switch closureArgCount impos jumps
+    IR.switch closureArgCount impossible jumps
 
-    impos <- IR.block `named` "impossible1"
+    impossible <- IR.block `named` "impossible"
     IR.unreachable
 
     -- All closures will have a context argument stored in them,
@@ -595,11 +617,7 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
           -- we use GEP to calculate the right offset and then
           -- generate the calling code with the remaining arguments
           -- and offset stack pointer.
-          let stackArgsTy' = D.trace "stack args ty" stackArgsTy
-              gepIdx = D.trace "stack args idx" $ IR.int32 1
-              stackArgs' = D.trace "stack args" stackArgs
-              restArgsPtr = stackArgs
-          -- restArgsPtr <- IR.gep stackArgsTy' stackArgs' [gepIdx] `named` "restArgsPtr"
+          restArgsPtr <- IR.gep stackArgsTy stackArgs [IR.int32 1] `named` "restArgsPtr"
           let argsLeftOp = IR.int32 $ argsLeft
           restArgsCount <- IR.sub stackArgCount argsLeftOp `named` "restArgCount"
           -- We call the returned function value, which stores the result in the return
@@ -618,7 +636,7 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
       pure $ (A.Int 32 $ fromInteger i, label)
     pure ()
   let entryBlockNames = entryBlocks <&> \(A.BasicBlock n _ _) -> n
-  D.traceM $ show funMVar <> " entryBlocks: " <> show entryBlockNames
+  DT.traceM $ show funMVar <> " entryBlocks: " <> show entryBlockNames
   emitDefn $ A.GlobalDefinition $ baseFunctionDefaults
     { AG.name = mvarToName $ mangleEntryFun funMVar
     , AG.parameters =
@@ -678,7 +696,7 @@ introVar var value = do
 localVarName :: Var -> BuildIR A.Name
 localVarName (Var txt) = do
   usedNames <- IR.liftIRState $ gets IR.builderUsedNames
-  D.traceM $ "used names: " <> show usedNames
+  DT.traceM $ "used names: " <> show usedNames
   let rawName = textToSBS txt
       nameCount = case Map.lookup rawName usedNames of
         Nothing -> error $ "Variable " <> show txt <> " had not been used."
@@ -691,7 +709,7 @@ localVarName (Var txt) = do
 -- on the stack or not.
 isOnStack :: Ty -> Bool
 isOnStack ty = case ty.tyf of
-  FunTy _ _ _ _ -> False
+  FunTy _ _ _ _ -> True
   RefTy _ _ -> False
   _ -> True
 
@@ -707,7 +725,8 @@ localVarOp var onStack llvmTy = do
     then do
       let varPtr = A.LocalReference A.ptr name
       IR.load llvmTy varPtr 1
-    else pure $ A.LocalReference llvmTy name
+    else do
+      pure $ A.LocalReference llvmTy name
 
 -- | Build a structure containing all free variables in a closure.
 buildClosureEnv :: ClosureEnv -> BuildIR A.Operand
@@ -732,12 +751,13 @@ genIR cenvTy = go where
       closurePtr <- buildClosurePtr [cenvOp]
       buildFunValueFor funMVar closurePtr
     AppSF funExpr args -> do
-      argOps <- traverse go args
       case funExpr.specf of
         ClosureSF funMVar cenv -> do
+          argOps <- traverse go args
           cenvOp <- buildClosureEnv cenv
           knownCall funMVar cenvOp argOps
         RecClosureSF funMVar contextVar -> do
+          argOps <- traverse go args
           cenvName <- localVarName $ mkRecContextVar contextVar
           let cenvOp = A.LocalReference cenvTy cenvName
           knownCall funMVar cenvOp argOps
@@ -748,6 +768,7 @@ genIR cenvTy = go where
                 FunTy _ _ _ _ -> True
                 _ -> False
           funValRaw <- go funExpr
+          argOps <- traverse go args
           funVal <- case funExpr.ty.tyf of
             FunTy _ _ _ _ -> pure funValRaw
             RefTy _ Ty{tyf=FunTy _ _ _ _} -> IR.load funValueType funValRaw 1
@@ -760,7 +781,8 @@ genIR cenvTy = go where
     DropSF svar varTy body -> do
       case varTy.tyf of
         FunTy Many _ _ _ -> do
-          varOp <- localVarOp svar.var False funValueType
+          varOp <- localVarOp svar.var True funValueType
+          -- NOTE the error is triggered here.
           freeClosurePtrIn varOp
         RefTy _ _ -> pure ()
         _ -> error "shouldn't be able to drop this"
@@ -789,20 +811,21 @@ genIR cenvTy = go where
               rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar'
           enumLoc' <- go t1
           conTagLoc <- indexStructPtr rawEnumTy enumLoc' 0
-          conTag' <- IR.load A.i8 conTagLoc 1
+          conTag' <- IR.load A.i8 conTagLoc 1 `named` "constructorTag"
           pure (enumLoc', conTag', dtMVar')
         _ -> do
           -- NOTE: I think I have to do this really annoying bitcast thing right now.
           -- hopefully I can find optimization passes or something to avoid this. Or
           -- a bitcast that works on structures.
           let dtMVar' = fromJust $ mvarForDataTy t1.ty
+          DT.traceM $ "owned " <> show dtMVar' <> " t1: " <> show t1
           rawEnumVal <- go t1
-          conTag' <- IR.extractValue rawEnumVal [0]
+          conTag' <- IR.extractValue rawEnumVal [0] `named` "constructorTag"
           rawEnumTy <- typeOf rawEnumVal
           enumLoc' <- IR.alloca rawEnumTy Nothing 1
           IR.store enumLoc' 1 rawEnumVal
           pure (enumLoc', conTag', dtMVar')
-      IR.switch conTag impossible2 $ dests <&> \(tagVal, label,_) -> (tagVal, label)
+      IR.switch conTag impossible $ dests <&> \(tagVal, label,_) -> (tagVal, label)
       dests <- forM (zip [0..] orderedBranches) \(i, CaseBranch conSVar memSVars body) -> do
         conLabel <- IR.block `named` textToSBS conSVar.var.name
         let conTy = enumConType dtMVar conSVar.var
@@ -813,7 +836,7 @@ genIR cenvTy = go where
         conResult <- go body
         IR.br caseEnd
         pure (A.Int 8 i, conLabel, conResult)
-      impossible2 <- IR.block `named` "impossible2"
+      impossible <- IR.block `named` "impossible"
       IR.unreachable
       caseEnd <- IR.block `named` "caseEnd"
       IR.phi $ dests <&> \(_, label, res) -> (res, label)
@@ -838,7 +861,7 @@ genIR cenvTy = go where
 -- | Generate the entry and fast function.
 genFun :: HasCallStack => MVar -> ClosureEnv -> (Maybe SVar) -> [(SVar, Ty, Mult)] -> SpecIR -> Gen ClosureInfo
 genFun funMVar cenv mbFix params body = do
-  D.traceM $ "!genFun: " <> show funMVar
+  DT.traceM $ "!genFun: " <> show funMVar
   cim <- gets (.closureInfo)
   case M.lookup funMVar cim of
     Just ci -> pure ci
@@ -847,11 +870,11 @@ genFun funMVar cenv mbFix params body = do
       -- DT.traceM $ "!body.ty: " <> show body.ty
       fastRetTy <- toLlvmType body.ty
       ctxTy <- closureEnvToType cenv
-      ((ctxName, argNames), fastBlocks) <- runBuildIR do
+      llvmParamTys <- traverse toLlvmType paramTys
+      (allArgNames, fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
-        ctxName' <- mkCtxName
-        argNames' <- traverse (\(svar, _, _) -> introVarName svar.var) params
-        let ctxOp = A.LocalReference ctxTy ctxName'
+        (ctxName, ctxOp) <- introArg contextVar ctxTy False
+        (argNames, _) <- fmap unzip $ sequence $ zipWith3 introArg paramVars llvmParamTys $ isOnStack <$> paramTys
         case mbFix of
           Nothing -> pure ()
           Just SVar{var} -> do
@@ -859,9 +882,8 @@ genFun funMVar cenv mbFix params body = do
             error "TODO create function value that calls this function and store it"
         extractClosureEnv cenv ctxOp
         genIR ctxTy body
-        pure (ctxName', argNames')
-      llvmParams <- sequence $ zipWith mkLlvmParam argNames paramTys
-      let fastParams = (A.Parameter ctxTy ctxName []):llvmParams
+        pure $ ctxName:argNames
+      let fastParams = zipWith (\name ty -> A.Parameter ty name []) allArgNames (ctxTy:llvmParamTys)
           fastName = mvarToName $ mangleFastFun funMVar
           fastDef = baseFunctionDefaults
             { AG.name = fastName
@@ -870,29 +892,33 @@ genFun funMVar cenv mbFix params body = do
             , AG.returnType = fastRetTy
             }
           llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
-      D.traceM $ "fastParams: " <> show fastParams
+      DT.traceM $ "fastParams: " <> show fastParams
       emitDefn $ A.GlobalDefinition fastDef
       genEntryFun funMVar body.ty fastRetTy llvmArgTys
       let closureInfo = ClosureInfo fastRetTy llvmArgTys
       addClosureInfo funMVar closureInfo
       pure closureInfo
   where
-  paramTys = params <&> \(_,ty,_) -> ty
-  mkCtxName :: BuildIR A.Name
-  mkCtxName = do
-    let baseVar = maybe (Var "emptyCtx") (.var) mbFix
-        ctxVar = mkRecContextVar baseVar
-    introVarName ctxVar
-  mkLlvmParam name ty = do
-    DT.traceM $ "!param ty: " <> show ty
-    ty' <- toLlvmType ty
-    pure $ A.Parameter ty' name []
+  -- | Introduce a function argument. Takes a boolean indicating whether or not
+  -- we need to store it on the stack so that it can be accessed by reference.
+  introArg :: Var -> A.Type -> Bool -> BuildIR (A.Name, A.Operand)
+  introArg var ty onStack = do
+    name <- introVarName var
+    let argRef = A.LocalReference ty name
+    -- We need to store it on the stack so that it can have references
+    -- taken in the function body.
+    when onStack $ void $ introVar var argRef
+    DT.traceM $ "introArg: " <> show name <> " " <> show ty <> " " <> (if onStack then "on stack" else "in register")
+    pure (name, argRef)
+  (paramVars, paramTys) = unzip $ params <&> \(svar, ty, _) -> (svar.var, ty)
+  contextVar = mkRecContextVar $ maybe (Var "emptyCtx") (.var) mbFix
 
 -- | Declare the external functions for all the important calls like malloc.
 llvmDeclarations :: Gen ()
 llvmDeclarations = do
-  void $ extern (A.Name "malloc") [A.i32] A.ptr
-  void $ extern (A.Name "free") [A.ptr] A.void
+  void $ typedef "FunValueType" $ Just $ A.StructureType False [A.ptr, A.ptr]
+  void $ extern "malloc" [A.i32] A.ptr
+  void $ extern "free" [A.ptr] A.void
 
 -- | Perform a get element pointer on the type to get its size
 -- and then malloc a space on the heap.
@@ -916,7 +942,7 @@ freePtr ptrVal = do
 genDecl :: MVar -> SpecDecl -> Gen ()
 genDecl mvar decl = case decl of
   SpecDataType sdt -> do
-    D.traceM $ "Generating type: " <> show mvar
+    DT.traceM $ "Generating type: " <> show mvar
     void $ genType mvar sdt
   SpecFun cenv mbFix args bodyIR -> void $ genFun mvar cenv mbFix args bodyIR
 
@@ -943,7 +969,7 @@ runGen specDeclMap specDecls llvmCtx dl = do
             specDecls' = reverse specDecls
             tyDecls = filter isTyDecl specDecls'
             funDecls = filter (not . isTyDecl) specDecls'
-        D.traceM $ "decls: " <> show specDeclMap
+        -- DT.traceM $ "decls: " <> show specDeclMap
         traverse_ (uncurry genDecl) $ tyDecls
         traverse_ (uncurry genDecl) $ funDecls
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act

@@ -127,7 +127,6 @@ typeSubInArgs subTys args = zip3 vars (applyTypeParams subTys tys) mults where
 -- it.
 guardDecl :: MVar -> Spec SpecDecl -> Spec MVar
 guardDecl mvar act = do
-  D.traceM $ "guard decl: " <> show mvar
   specDecls <- gets (.specDecls)
   case M.lookup mvar specDecls of
     Just _ -> pure ()
@@ -153,7 +152,6 @@ specTy ty = case parseTyCon ty of
 -- Only does so once.
 specDataType :: DataType -> [Ty] -> Spec MVar
 specDataType dt tyArgs = do
-  D.traceM $ "spec data type: " <> show name
   guardDecl name $ SpecDataType <$> specDt
   where
   name = mangleDataType (getDataTypeName dt) tyArgs
