@@ -24,8 +24,8 @@ import GHC.Generics
 import GHC.Stack
 
 data SpecF a
-  = CaseSF a [CaseBranch a]
-  | LetStructSF SVar [SVar] a a
+  = CaseSF a [CaseBranchTy a]
+  | LetStructSF SVar [(SVar, Ty)] a a
   | LetSF SVar a a
   -- | Create an initial closure for a function.
   --
@@ -92,13 +92,16 @@ instance Pretty SpecIR where
   pretty ir = go 0 ir where
     go parenLevel ir@SpecIR{specf} = case specf of
       CaseSF t1 brs ->
-        let brDoc (CaseBranch con mems tb) = group $ "|" <+> hsep (pretty <$> (con:mems))
-              <+> "->" <> softline <> nest 2 (group $ go 0 tb)
+        let brDoc (CaseBranchTy con memTys tb) =
+              let (mems,_) = unzip memTys in
+                group $ "|" <+> hsep (pretty <$> (con:mems))
+                  <+> "->" <> softline <> nest 2 (group $ go 0 tb)
             ofDoc = group $ "case" <+> group (go 0 t1) <+> "of"
         in parenFor 1 $ align $ vsep $ ofDoc:(brDoc <$> brs)
-      LetStructSF con mems t1 t2 ->
-        "let" <+> group (hsep (pretty <$> (con:mems))) <+> "="
-        <+> go 0 t1 <+> "in" <> line <> go 0 t2
+      LetStructSF con memTys t1 t2 ->
+        let (mems,_) = unzip memTys in
+          "let" <+> group (hsep (pretty <$> (con:mems))) <+> "="
+          <+> go 0 t1 <+> "in" <> line <> go 0 t2
       LetSF v t1 t2 ->
         "let" <+> pretty v <+> "="
         <+> group (go 0 t1) <+> "in" <> line <> go 0 t2

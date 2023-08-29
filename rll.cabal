@@ -178,8 +178,6 @@ test-suite rll-test
       Rll.AstUtil
       Rll.GenSpec
       Rll.ParserSpec
-      Rll.ScSpec
-      Rll.ScSpecUtil
       Rll.TcSpecUtil
       Rll.TypeCheckSpec
       Paths_rll

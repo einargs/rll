@@ -2,7 +2,13 @@
 module Rll.GenSpec where
 
 import QuoteTxt
-import Rll.ScSpecUtil (parseFile')
+import qualified Rll.Parser as RP
+import Rll.SpecIR (SpecDecl, MVar)
+import Rll.TypeCheck (typeCheckFile)
+import Rll.TypeError (prettyPrintError)
+import Rll.TcMonad (runTc)
+import Rll.Spec (specModule)
+import Rll.Context
 import Rll.GenLLVM
 
 import LLVM.Context qualified as L
@@ -11,8 +17,26 @@ import LLVM.AST qualified as A
 import LLVM.AST.DataLayout qualified as A
 
 import Data.Text (Text)
+import Data.Text qualified as T
+import Data.HashMap.Strict qualified as HM
+import Text.Megaparsec qualified as MP
 import Data.ByteString.Char8 qualified as BS
 import Test.Hspec
+
+parseFile' :: Text -> IO (Maybe ([(MVar, SpecDecl)], HM.HashMap MVar SpecDecl))
+parseFile' txt = case MP.parse RP.fileDecls "test.rll" txt of
+  Left err -> exFail $ MP.errorBundlePretty err
+  Right decls ->
+    case runTc emptyCtx $ typeCheckFile decls of
+      Left err -> exFail $ T.unpack $ prettyPrintError txt err
+      Right (coreFns, ctx) ->
+        case specModule ctx.dataTypes coreFns of
+          Left err -> exFail $ "Specialization error: " <> show err
+          Right declInfo -> pure $ Just declInfo
+  where
+  exFail msg = do
+    expectationFailure msg
+    pure Nothing
 
 willGen :: Text -> Expectation
 willGen txt = do

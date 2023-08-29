@@ -59,30 +59,30 @@ useTcMethod Synth = synth
 --
 -- The span is the span of the overall case statement. Each branch has a span for the
 -- body of that branch.
-joinBranches :: TcMethod -> Span -> [Tc Core] -> Tc [Core]
+joinBranches :: TcMethod -> Span -> [Tc (CaseBranchTy Core)] -> Tc [CaseBranchTy Core]
 joinBranches _ s [] = throwError $ NoCaseBranches s
 joinBranches _ s [b] = pure <$> b
 joinBranches method s (b:bs) = do
   ctx <- get
-  core1@Core{ty=ty1, span=s1} <- b
+  branch1@(CaseBranchTy _ _ (core1@Core{ty=ty1, span=s1})) <- b
   ctx1 <- get
   let f b = do
         put ctx
-        bCore <- b
+        branch@(CaseBranchTy _ _ bCore) <- b
         let s = getSpan bCore
         ctx' <- get
-        pure $ ((s,bCore.ty),s,ctx',bCore)
-  (sTys,spans,ctxs, cores) <- unzip4 <$> traverse f bs
-  let cores' = core1:cores
+        pure $ ((s,bCore.ty),s,ctx',branch)
+  (sTys,spans,ctxs, branches) <- unzip4 <$> traverse f bs
+  let coreBranches' = branch1:branches
   unless (all (localEq ctx1) ctxs) $
     let ctxs' = diffCtxTerms $ ctx1:ctxs
         sCtxs = zip (s1:spans) ctxs'
     in throwError $ CannotJoinCtxs sCtxs s
   case method of
-    Check _ -> pure cores'
+    Check _ -> pure coreBranches'
     Synth -> do
       unless (all ((ty1==) . snd) sTys) $ throwError $ CannotJoinTypes ((s1,ty1):sTys) s
-      pure cores'
+      pure coreBranches'
 
 toRef :: Span -> Ty -> Ty -> Ty
 toRef s lt ty@(Ty _ (RefTy _ _)) = ty
@@ -92,11 +92,12 @@ toRef s lt ty = Ty s $ RefTy lt ty
 --
 -- Uses toRef to ensure that if the member we borrow is a reference, we
 -- just get that reference as a type instead of a reference to a reference.
-addPartialBorrowVar :: Var -> Span -> Ty -> Ty -> Tc ()
+addPartialBorrowVar :: Var -> Span -> Ty -> Ty -> Tc (SVar, Ty)
 addPartialBorrowVar v s lt bTy = do
   let ty = toRef s lt bTy
   addVar v s ty
   incRef ty
+  pure (SVar v s, ty)
 
 -- | Pull apart a fully applied type constructor.
 --
@@ -119,7 +120,7 @@ caseClause :: Span -> Tm -> [CaseBranch Tm] -> TcMethod -> Tc Core
 caseClause caseSpan t1 branches tcMethod = do
   t1Core@Core{ty=t1Ty} <- synth t1
   useRef t1Ty
-  cores <- case t1Ty.tyf of
+  coreBranches <- case t1Ty.tyf of
     RefTy lt enumTy -> do
       --decrementLts lt
       (tyName,conMap) <- ensureEnum enumTy
@@ -130,14 +131,15 @@ caseClause caseSpan t1 branches tcMethod = do
       let f sv ty = do
             addVar sv.var sv.span ty
             incRef ty
+            pure (sv, ty)
       joinBranches tcMethod caseSpan $ handleBranch f tyName conMap <$> branches
-  unless (length cores == length branches) $ throwError $
-    CompilerLogicError ("cores length " <> T.pack (show (length cores)) <>
+  unless (length coreBranches == length branches) $ throwError $
+    CompilerLogicError ("cores length " <> T.pack (show (length coreBranches)) <>
                        " branches length " <> T.pack (show (length branches)))
       (Just caseSpan)
-  let f (CaseBranch con members _) core = CaseBranch con members core
-      coreBranches = zipWith f branches cores
-  pure $ Core (head cores).ty caseSpan $ CaseCF t1Core coreBranches
+  let caseExprTy = let CaseBranchTy _ _ body = head coreBranches
+                       in body.ty
+  pure $ Core caseExprTy caseSpan $ CaseCF t1Core coreBranches
   where
     method = useTcMethod tcMethod
 
@@ -168,7 +170,8 @@ caseClause caseSpan t1 branches tcMethod = do
         _ -> throwError $ TypeIsNotEnum enumTy (getSpan t1)
 
     -- | Type check a branch of the case expression.
-    handleBranch :: (SVar -> Ty -> Tc ()) -> Var -> M.HashMap Text [Ty] -> CaseBranch Tm -> Tc Core
+    handleBranch :: (SVar -> Ty -> Tc (SVar, Ty)) -> Var
+      -> M.HashMap Text [Ty] -> CaseBranch Tm -> Tc (CaseBranchTy Core)
     handleBranch addMember tyName conMap (CaseBranch conVar vars body) = do
       case M.lookup conVar.var.name conMap of
         Nothing -> throwError $ UnknownEnumCase tyName conVar
@@ -176,10 +179,10 @@ caseClause caseSpan t1 branches tcMethod = do
           unless (length varTys == length vars) $ throwError
             $ BadEnumCaseVars vars varTys caseSpan
           let members = zip vars varTys
-          forM_ members $ uncurry addMember
+          memberVarTys <- forM members $ uncurry addMember
           val <- method body
           endVarScopes $ (.var) <$> vars
-          pure val
+          pure $ CaseBranchTy conVar memberVarTys val
 
 -- | Take a type that should be for a fully applied struct and get the types
 -- of the members with all type arguments applied.
@@ -200,7 +203,7 @@ letStructClause :: Span -> SVar -> [SVar] -> Tm -> Tm -> (Tm -> Tc Core) -> Tc C
 letStructClause letSpan structCon memberVars t1 body method = do
   t1Core@Core{ty=t1Ty} <- synth t1
   useRef t1Ty
-  bodyCore <- case t1Ty.tyf of
+  (memberVarTys, bodyCore) <- case t1Ty.tyf of
     RefTy lt structTy -> do
       --decrementLts lt
       let f svar ty = addPartialBorrowVar svar.var svar.span lt ty
@@ -209,10 +212,11 @@ letStructClause letSpan structCon memberVars t1 body method = do
       let f svar ty = do
             addVar svar.var svar.span ty
             incRef ty
+            pure (svar, ty)
       handle f t1Ty
-  pure $ Core bodyCore.ty letSpan $ LetStructCF structCon memberVars t1Core bodyCore
+  pure $ Core bodyCore.ty letSpan $ LetStructCF structCon memberVarTys t1Core bodyCore
   where
-    handle :: (SVar -> Ty -> Tc ()) -> Ty -> Tc Core
+    handle :: (SVar -> Ty -> Tc (SVar, Ty)) -> Ty -> Tc ([(SVar, Ty)], Core)
     handle addMember t1Ty = do
       (structCon', tyName, memberTys) <- getStructMembers t1Ty $ getSpan t1
       unless (structCon.var.name == structCon') $ throwError $
@@ -220,10 +224,10 @@ letStructClause letSpan structCon memberVars t1 body method = do
       unless (length memberTys == length memberVars) $
         throwError $ BadLetStructVars memberVars memberTys
       let members = zip memberVars memberTys
-      forM_ members $ uncurry addMember
+      memberVarTys <- forM members $ uncurry addMember
       val <- method body
       endVarScopes $ (.var) <$> memberVars
-      pure val
+      pure (memberVarTys, val)
 
 letClause :: Span -> SVar -> Tm -> Tm -> (Tm -> Tc Core) -> Tc Core
 letClause s x t1 t2 f = do

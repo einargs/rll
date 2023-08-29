@@ -112,7 +112,8 @@ compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf}
     (_, Anno t1 ty) -> compareCoreToTm fullCore t1
     (CaseCF c1 cb, Case t1 tb) -> compareCoreToTm c1 t1 <|>
       allBranches cb tb
-    (LetStructCF cCon cVars c1 c2, LetStruct tCon tVars t1 t2) ->
+    (LetStructCF cCon cVarTys c1 c2, LetStruct tCon tVars t1 t2) ->
+      let cVars = fst $ unzip cVarTys in
       cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
       <|> compareCoreToTm c2 t2
     (LetCF cv c1 c2, Let tv t1 t2) -> cv #= tv
@@ -145,9 +146,10 @@ compareCoreToTm fullCore@(Core cTy _ core) tm@Tm{tmf}
          | otherwise = err
   allBranches cb tb | length cb /= length tb = error $ "wrong length"
                     | otherwise = asum $ zipWith compareBranches cb tb
-  compareBranches :: CaseBranch Core -> CaseBranch Tm -> Maybe (Core, Tm)
-  compareBranches (CaseBranch cCon cVars c1) (CaseBranch tCon tVars t1) =
+  compareBranches :: CaseBranchTy Core -> CaseBranch Tm -> Maybe (Core, Tm)
+  compareBranches (CaseBranchTy cCon cVarTys c1) (CaseBranch tCon tVars t1) =
     cCon #= tCon <|> cVars #= tVars <|> compareCoreToTm c1 t1
+    where cVars = fst $ unzip cVarTys
 
 mkTest :: HasCallStack => Ctx -> T.Text -> Expectation
 mkTest ctx txt = case M.parse RP.fileDecls "test.rll" txt of

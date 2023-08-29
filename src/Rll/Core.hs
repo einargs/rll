@@ -10,8 +10,8 @@ import Rll.Context (DataType)
 -- | This IR is produced during type checking and annotates every
 -- term with its type.
 data CoreF a
-  = CaseCF a [CaseBranch a]
-  | LetStructCF SVar [SVar] a a
+  = CaseCF a [CaseBranchTy a]
+  | LetStructCF SVar [(SVar, Ty)] a a
   | LetCF SVar a a
   | LamCF (Maybe SVar) [(TyVarBinding, Kind)] [(SVar, Ty)] ClosureEnv a
   | ModuleVarCF Var

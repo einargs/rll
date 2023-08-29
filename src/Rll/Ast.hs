@@ -250,7 +250,8 @@ data CaseBranch a = CaseBranch SVar [SVar] a
   deriving anyclass (FromJSON, ToJSON)
 
 data CaseBranchTy a = CaseBranchTy SVar [(SVar, Ty)] a
-  deriving (Show, Eq, Functor, Foldable, Traversable)
+  deriving (Show, Eq, Functor, Foldable, Traversable, Generic)
+  deriving anyclass (FromJSON, ToJSON)
 
 data Literal
   = IntLit Integer

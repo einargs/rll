@@ -416,9 +416,9 @@ addNamedInstr name instr = IR.modifyBlock \bb -> bb
 extractClosureEnv :: ClosureEnv -> A.Operand -> BuildIR ()
 extractClosureEnv cenv value = do
   t <- typeOf value
-  forM_ (zip [0..] $ M.keys cenv.envMap) \(i,v) -> do
+  forM_ (zip [0..] $ M.toList cenv.envMap) \(i,(var, use)) -> do
     val <- IR.extractValue value [i]
-    introVar v val
+    introVarWithLoc var (isClosureUseOnStack use) val
 
 -- | Load all of the variables from the environment and store
 -- them in the closure structure.
@@ -730,30 +730,47 @@ data VarLoc = OnStack | InReg
 
 -- | A predicate determining whether a type is allocated
 -- on the stack or not.
-isOnStack :: Ty -> VarLoc
-isOnStack ty = case ty.tyf of
+isTyOnStack :: Ty -> VarLoc
+isTyOnStack ty = case ty.tyf of
   FunTy _ _ _ _ -> InReg
   RefTy _ _ -> InReg
   _ -> OnStack
 
+-- | Determine whether we allocate a type in a closure use on the stack
+-- or not.
+isClosureUseOnStack :: ClosureUse Ty -> VarLoc
+isClosureUseOnStack (Moved ty) = isTyOnStack ty
+isClosureUseOnStack _ = InReg
+
 -- | Takes a variable name and a value and returns an llvm
 -- variable holding either a pointer to the stack allocation
 -- of the value or the value itself.
--- that value allocated on the stack if 
-introVar :: Var -> A.Operand -> BuildIR A.Operand
-introVar var value = do
+introVarWithLoc :: Var -> VarLoc -> A.Operand -> BuildIR A.Operand
+introVarWithLoc var varLoc value = do
   name <- introVarName var
   t <- typeOf value
-  -- TODO: convert this to check the RLL type to see if we need to allocate
-  -- on the stack or not.
-  addNamedInstr name $ A.Alloca t Nothing 1 []
-  let loc = A.LocalReference A.ptr name
-  IR.store loc 1 value
-  pure loc
+  case varLoc of
+    InReg -> do
+      -- This is a hacky awful thing that just exists to let us alias a register
+      -- level variable.
+      tmpLoc <- IR.alloca t Nothing 1 `named` "tmpLoc"
+      IR.store tmpLoc 1 value
+      addNamedInstr name $ A.Load False t tmpLoc Nothing 1 []
+      pure $ A.LocalReference t name
+    OnStack -> do
+      addNamedInstr name $ A.Alloca t Nothing 1 []
+      let loc = A.LocalReference A.ptr name
+      IR.store loc 1 value
+      pure loc
+
+-- | Introduce a variable name and store it on the stack or in register
+-- based on the RLL type.
+introVar :: Var -> Ty -> A.Operand -> BuildIR A.Operand
+introVar var ty value = introVarWithLoc var (isTyOnStack ty) value
 
 -- | Uses `localVarName` to build a local reference operand.
 --
--- We use `isOnStack` to figure out from the Rll type whether or not
+-- We use `isTyOnStack` to figure out from the Rll type whether or not
 -- the value is on the stack or in the raw variable.
 -- `onStack` indicates whether or not to load the variable from the
 -- stack. If it's true, the variable is a pointer to the passed type.
@@ -761,7 +778,7 @@ introVar var value = do
 localVarOp :: Var -> Ty -> A.Type -> BuildIR A.Operand
 localVarOp var varTy llvmTy = do
   name <- localVarName var
-  case isOnStack varTy of
+  case isTyOnStack varTy of
     OnStack -> localVarLoad var llvmTy
     InReg -> localVarRaw var llvmTy
 
@@ -821,7 +838,7 @@ genIR cenvTy = go where
       go body
     LetSF svar t1 t2 -> do
       t1Val <- go t1
-      introVar svar.var $ t1Val
+      introVar svar.var t1.ty t1Val
       -- NOTE: in the future I can probably use the lifetime intrinsics to
       -- start and end the alloc lifetime around `go t2`.
       go t2
@@ -835,7 +852,7 @@ genIR cenvTy = go where
       IR.store enumLoc 1 conVal
       IR.load rawEnumTy enumLoc 1
     CaseSF t1 branches -> mdo
-      let getConTxt (CaseBranch svar _ _) = svar.var.name
+      let getConTxt (CaseBranchTy svar _ _) = svar.var.name
           orderedBranches = sortBy (compare `on` getConTxt) branches
       (enumLoc, conTag, dtMVar) <- case t1.ty.tyf of
         RefTy _ dtTy -> do
@@ -858,16 +875,16 @@ genIR cenvTy = go where
           IR.store enumLoc' 1 rawEnumVal
           pure (enumLoc', conTag', dtMVar')
       IR.switch conTag impossible $ dests <&> \(tagVal, label,_) -> (tagVal, label)
-      dests <- forM (zip [0..] orderedBranches) \(i, CaseBranch conSVar memSVars body) -> do
+      dests <- forM (zip [0..] orderedBranches) \(i, CaseBranchTy conSVar memVarTys body) -> do
         conLabel <- IR.block `named` textToSBS conSVar.var.name
         let conTy = enumConType dtMVar conSVar.var
         conVal <- IR.load conTy enumLoc 1
-        forM_ (zip [0..] memSVars) \(i, SVar{var}) -> do
+        forM_ (zip [0..] memVarTys) \(i, (SVar{var}, varTy)) -> do
           mem <- IR.extractValue conVal [i]
           -- TODO: I think I'm going to need to add info about the enum types to the branch?
           -- Yeah, change up `CaseBranch` for something where the memSVars are paired with their
           -- RLL type. Actually this maybe needs to be backpropagated to the Core IR as well.
-          introVar var mem
+          introVar var varTy mem
         conResult <- go body
         IR.br caseEnd
         pure (A.Int 8 i, conLabel, conResult)
@@ -887,9 +904,9 @@ genIR cenvTy = go where
           let dtMVar = fromJust $ mvarForDataTy t1.ty
           structVal' <- go t1
           pure (structVal', dtMVar)
-      forM_ (zip [0..] memSVars) \(i, SVar{var}) -> do
+      forM_ (zip [0..] memSVars) \(i, (SVar{var}, varTy)) -> do
         mem <- IR.extractValue structVal [i]
-        introVar var mem
+        introVar var varTy mem
       go t2
     LiteralSF lit -> error "TODO"
 
@@ -909,7 +926,7 @@ genFun funMVar cenv mbFix params body = do
       (allArgNames, fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
         (ctxName, ctxOp) <- introArg contextVar ctxTy InReg
-        (argNames, _) <- fmap unzip $ sequence $ zipWith3 introArg paramVars llvmParamTys $ isOnStack <$> paramTys
+        (argNames, _) <- fmap unzip $ sequence $ zipWith3 introArg paramVars llvmParamTys $ isTyOnStack <$> paramTys
         case mbFix of
           Nothing -> pure ()
           Just SVar{var} -> do
@@ -942,7 +959,8 @@ genFun funMVar cenv mbFix params body = do
     -- We need to store it on the stack so that it can have references
     -- taken in the function body.
     case varLoc of
-      OnStack -> void $ introVar var argRef
+      OnStack -> void $ introVarWithLoc var OnStack argRef
+      -- For in register stuff, we can just skip 
       InReg -> pure ()
     pure (name, argRef)
   (paramVars, paramTys) = unzip $ params <&> \(svar, ty, _) -> (svar.var, ty)

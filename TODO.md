@@ -67,42 +67,10 @@ Spec tests
 - [X] Add a pass to the spec stuff that iterates over all of the produced types
   in the spec IR and makes sure there's no type variables.
 
-## Imp
-- The `Imp` stage will have specific "instructions" for whether a function is
-  immediately invoked or is partially applied and results in a thunk.
-- Mechanically I think `VarSF` and `CopySF` become the exact same thing when dealing with
-  a reference: copying the pointer.
-- [ ] I need to implement Box and a recursive check by this point, because otherwise
-  recursive data types are infinite in size.
-- [ ] Implement basic calling convention.
-- [ ] Maybe want to start including the data type in each case and let struct
-  in the `Core` stage? We'll see if this is useful for `Imp`.
-- [ ] I'm going to need to work out tools for generating the values for enum tags
-  and for accessing them and such. Maybe I'll have an `ImpDataType`
-- [ ] Eventually I might want to convert types in the spec layer into a new kind
-  of fully applied type with type level distinguishment between data types and
-  function types. That would make some of my functions nicer.
-
 ## LLVM
-- [X] I'm going to have to redo everything to use `alloca` so that taking the reference
-  of something actually means a damn.
-  - You can't take the reference of a reference, so I guess that could be a normal variable.
-    - That might mean I have to pass around the type of stuff so I know if I need to load
-      it? Well, I guess I already do need to do that.
-  - Actually easier than I thought. `genIR` could still return variables holding values.
-    Just needed logic to load from those variables at `VarSF` etc.
-- [ ] I think I want to maybe mark the functions that wrap constructors as always inline,
-  so that the entry function inlines them.
-- [ ] I need some way to get information about the data type for constructors and cases.
-- [X] In the future I can make it so that I don't store references on the stack?
-- [X] Currently in the middle of adding the type of the dropped variable to `Drop`.
-  - [X] This means I need to fix all of the type substitution code.
-  - [X] Also need to fix the test code.
 - [ ] I think I have a bug where if you have a reference to a function and apply
   a type application to it, you get a function value instead of a reference. This
   means you could drop it again, causing a double free.
-- [ ] Before generating IR for the body of a function, we need to precalculate their
-  types. Or I could use named types.
 - [ ] Potential problem: how are zero argument functions/rebuilt values going to work?
   I'll have to write tests for them.
 - [ ] Check whether recursive function closures become part of a closure environment
@@ -112,18 +80,9 @@ Spec tests
     for recursive functions.
 - [ ] Create normal variables holding the function value when we have a recursive function
   declared.
-- [X] Double check that shadowing a variable creates a type error so that we don't have
-  to worry about creating fresh names.
-  - If I ever need to, I can disambiguate names during `Spec`.
-  - Make sure that this also applies to recursive function names.
-- [X] Inside the generated IR I should drop closures when they're consumed instead of relying
-  on the entry function to do it if necessary.
-  - I should have that working using the type of the called function value. If it's bare, I know
-    I should free the closure pointer.
 - [X] Work on breaking `genEntryFun` up so that the entry block generation isn't so monolithic.
   - [ ] Consider writing utilities to load and store to `indexStructPtr`; it would simplify
     some of the helpers in that block.
-- [X] `genEntryFun` should be working.
 - [ ] Look into whether I can just leave `load` and `alloca` instructions with the `align` arg
   as `1` or if I need to pass the data layout around and read from that. I think that it'll
   automatically promote the alignment based on the stack alignment.
@@ -139,11 +98,6 @@ Spec tests
     type sizes for enums and store that instead of doing it dynamically. So I could break this phase
     into two parts: type gen and code gen.
 - [ ] Make references to functions just raw function values.
-- [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
-  has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
-  functions into just standard function values since no need to know about that.
-  - What about a way to mark variables as either pointers to the stack or raw variables? Would
-    have caught some bugs. Build it into the variable generation and use?
 - [ ] Some `closureArg_0` blocks in `main%.entry` in `"takes a reference to a function as an argument"`
   have no instructions in them. Not sure if this is a problem.
 - [ ] I'm pretty sure that functions or function references in closure environments is going to cause
@@ -497,6 +451,13 @@ Thoughts about various future features.
 - [ ] Something that lets me pass a multi-use function as a single use. Subtyping?
 - [ ] Could make gen and spec errors and such include a stack, since they're supposed to be
   compiler errors.
+- [ ] I think I want to maybe mark the functions that wrap constructors as always inline,
+  so that the entry function inlines them.
+- [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
+  has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
+  functions into just standard function values since no need to know about that.
+  - What about a way to mark variables as either pointers to the stack or raw variables? Would
+    have caught some bugs. Build it into the variable generation and use?
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.
