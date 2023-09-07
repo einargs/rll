@@ -5,8 +5,9 @@ module Rll.Ast
   , Kind(..), Mult(..), Ty(..), TyF(..)
   , Tm(..), TmF(..), CaseBranch(..), Literal(..)
   , CaseBranchTy(..)
-  , parseTyCon
+  , parseTyCon, parseFunTy
   , ClosureUse(..), ClosureEnv(..)
+  , i64TyName, stringTyName
   ) where
 
 import Data.Text (Text)
@@ -181,6 +182,12 @@ instance ToJSON a => ToJSON (TyF a) where
 data Ty = Ty { span :: Span, tyf :: (TyF Ty) }
   deriving (Eq)
 
+i64TyName :: Var
+i64TyName = Var "I64"
+
+stringTyName :: Var
+stringTyName = Var "String"
+
 instance FromJSON Ty where
   parseJSON v = Ty es <$> parseJSON v
     where es = Span "" 1 1 1 1
@@ -235,6 +242,15 @@ parseTyCon ty = collectApps [] ty where
     TyApp b a -> collectApps (a:rs) b
     TyCon v -> Just (v, rs)
     _ -> Nothing
+
+-- | Get the function arguments and return type if this is a function.
+--
+-- Returns nothing if the function is polymorphic.
+parseFunTy :: Ty -> Maybe ([Ty], Ty)
+parseFunTy Ty{tyf=FunTy _ arg _ ret} = case parseFunTy ret of
+  Nothing -> Just ([arg], ret)
+  Just (args, retTy) -> Just (arg:args, retTy)
+parseFunTy _ = Nothing
 
 instance Pretty Ty where
   pretty = basePrettyTy NoTyParen

@@ -160,8 +160,8 @@ mkTest ctx txt = case M.parse RP.fileDecls "test.rll" txt of
           _ -> Nothing
     in case evalTc ctx $ typeCheckFile decls of
       Left err -> expectationFailure $ T.unpack $ prettyPrintError txt err
-      Right coreFns ->
-        case asum $ zipWith compare (snd <$> coreFns) tmFns of
+      Right TcResult{coreFuns} ->
+        case asum $ zipWith compare (snd <$> coreFuns) tmFns of
           Nothing -> pure ()
           Just (fullCore, fullTm, core, tm) -> expectationFailure $
             "Core didn't match term.\nCore(" <> show core.span

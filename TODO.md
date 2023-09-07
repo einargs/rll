@@ -37,35 +37,15 @@ Thoughts
     doesn't reify the closure environment.
 - [X] Write name mangler.
   - [ ] Test name mangler.
-- [X] Just go ahead and fully specialize the types now. `Imp` can use the same data
-  structures probably, and this is the specialization stage.
   - [ ] Test how fully specialized types that take higher kinded arguments are working.
-- [X] Fix the broken tests for type checking after syntax changed.
 - [ ] Write some tests to figure out how we should be tracking borrow counts for type variables.
   Because I have a sudden realization that I could write some bad code by using type variables.
   - Maybe? I mean, while a type variable lifetime exists we know it isn't deallocated, so isn't
     anything fine? And anything persisting has to be accounted for?
   - I'll have to actually reason this out.
-- [X] When synthesizing function types I need to make sure that I don't automatically make
-  all Univ `Many`, because then a single-use context can be duplicated.
 - [ ] Add tests for closure environments in `Core`.
-- [X] Move the type substitution stuff to another file so that `Spec.hs` doesn't
-  need to directly import `Tc.hs`
-  - [X] Move most of the stuff in `Tc.hs` to another file so that all the re-indexing
-    stuff can just import that and be in it's own module.
 - [ ] Double check that the order of members in struct decls isn't getting reversed.
   (I think it is. Maybe it's just a glitch in pretty printing.)
-- [X] BUG: Right now if a data type doesn't get mentioned in a function deriving from `main`,
-  it doesn't get specialized -- even if it's in an unused case of an enum that is mentioned.
-
-Spec tests
-- [ ] I'll write the tests by having a good pretty printer and manually checking that
-  it looks right, then getting a serialized output and sticking it in.
-  - I'll use `Aeson` package.
-- [ ] Make sure that you can't alias a polymorphic function.
-- [ ] Write tests for how specializing references to functions should work.
-- [X] Add a pass to the spec stuff that iterates over all of the produced types
-  in the spec IR and makes sure there's no type variables.
 
 ## LLVM
 - [ ] I think I have a bug where if you have a reference to a function and apply
@@ -102,6 +82,47 @@ Spec tests
   have no instructions in them. Not sure if this is a problem.
 - [ ] I'm pretty sure that functions or function references in closure environments is going to cause
   problems when determining whether they're on the stack or not via `Moved` and `Refd`.
+
+Next
+- [X] Make integer literals copyable and dropable.
+- [X] Make `genIR` generate code for literal `Int64`s.
+- [ ] Add a way to have built-in functions implemented in LLVM.
+  - [X] Inline builtin ops in GenLLVM.
+  - [X] Generate the baseline wrappers around built-in operations.
+  - [ ] I don't know if I need to generate empty `ClosureEnv` arguments for the built-in fast functions
+    or not. I'm going to guess that I don't and hope the entry function still works?
+  - [ ] Generate entry function wrappers around built-in operation wrappers. I'll need to somehow abstract
+    this part to avoid duplication with existing entry function generation.
+  - [ ] I could maybe do something to avoid duplicating code for the wrappers and built-in operations.
+- [ ] Take out all the trace statements.
+- [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
+
+Future
+- [ ] Remove all of the Aeson FromJSON and ToJSON stuff.
+- [ ] In the future, we'll add another map to `Ctx` during type checking that will hold all `extern`
+  references to C functions.
+  - Maybe I should make `Tc` emit declarations? Where do I check that data types don't have
+    recursive references right now.
+- [ ] I need to fix that problem where either we never infer that multi-argument functions can return many
+  use functions, or that the type checker rejects them even if they're explicitly defined.
+  - may need to check that created functions work right
+- [ ] I need to write up a list (on paper) of all the different pieces of my modules so I can separate them out.
+  - Maybe use a types folder where I declare types?
+- [ ] Clean up `TODO.md`; it's fine to just delete sections since they're still in git.
+  - [ ] Also make like a documentation file where I can move/rewrite some documentation stuff.
+- [ ] I should split `GenLLVM` into something focused on generating code for expressions, something focused
+  on generating code for types, and something focused on generating functions.
+- [ ] Query based compiler might be a good way to architect this when I re-organize things.
+
+### Built-In Function Approaches
+- I can add a separate SpecIR term, or I can just have the proper function definitions generated normally.
+  I think I'll have the builtin function definitions generated on their own and just rely on llvm to simplify.
+- I could make built-in functions normal functions that get an entry function generated for them.
+  - In the future when I want external C functions, I could have an `extern` statement that causes
+    it to be recorded in a separate list to be processed by the `Gen` stage?
+- I could have them be a separate kind of function that must be fully invoked. This could be:
+  - A type-level difference
+  - Just an additional check, probably in a lower level check. I'm not a fan of that.
 
 # Compilation
 I'm thinking that I'll have a fully annotated IR that stuff gets translated to as we type check.
@@ -374,6 +395,19 @@ These are eventual things to do for polishing.
 - [ ] Once I've worked out all the ways I want to mangle things, I can use a data structure for `MVar`s
   and then when I finally convert them to text I'll use a lazy text to accumulate everything and then convert
   straight to a single strict text.
+- [ ] I think I want to maybe mark the functions that wrap constructors as always inline,
+  so that the entry function inlines them.
+- [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
+  has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
+  functions into just standard function values since no need to know about that.
+  - What about a way to mark variables as either pointers to the stack or raw variables? Would
+    have caught some bugs. Build it into the variable generation and use?
+- [ ] Figure out some kind of logging system.
+- [ ] Move the mangling stuff to a new data structure instead of a bizarre shitty text thing.
+- [ ] Make the entry functions for built-in functions just do the operation themselves.
+  - I can make `genEntryFun` take an argument that's like `genOp` and have that either generate
+    a call to the fast function or do the actual operation.
+- [ ] Does `genFun` actually need to check if the function has already been generated?
 
 ## Better Errors
 - [X] Improve the context join error to highlight the areas that conflict and label them directly
@@ -451,13 +485,18 @@ Thoughts about various future features.
 - [ ] Something that lets me pass a multi-use function as a single use. Subtyping?
 - [ ] Could make gen and spec errors and such include a stack, since they're supposed to be
   compiler errors.
-- [ ] I think I want to maybe mark the functions that wrap constructors as always inline,
-  so that the entry function inlines them.
-- [ ] It feels like I'll eventually want a lower level type system/set of annotations that only
-  has info relevant for llvm compilation. So like, no lifetimes, etc. Maybe turn references to
-  functions into just standard function values since no need to know about that.
-  - What about a way to mark variables as either pointers to the stack or raw variables? Would
-    have caught some bugs. Build it into the variable generation and use?
+- [ ] I'm going to eventually need a function that can take a reference to an integer and give
+  you an owned copy of it. This is because otherwise there's no way to get at an integer field
+  of a structure without deconstructing and reconstructing the structure.
+  - This kind of thing is going to need syntactic sugar. Dot access syntax if it's "copyable"?
+- [ ] Currently copy can't copy a global variable. So the below fails. I probably want to keep this?
+  It'll depend on how I do global variables. But if I keep it I need a better error message than
+  just saying the variable doesn't exist because it doesn't look at global variables.
+  ```
+  i : I64 = 123;
+  main : I64
+  = copy i;
+  ```
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

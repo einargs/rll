@@ -150,9 +150,11 @@ addDataType tyName dt = do
 addModuleFun :: Span -> Var -> Ty -> Tc ()
 addModuleFun s name ty = do
   ctx <- get
-  case M.lookup name ctx.moduleFuns of
-    Just _ -> throwError $ DefAlreadyExists name s
-    Nothing -> pure ()
+  let doesNotExistIn map =
+        case M.lookup name map of
+          Just _ -> throwError $ DefAlreadyExists name s
+          Nothing -> pure ()
+  doesNotExistIn ctx.moduleFuns
   put $ ctx {moduleFuns=M.insert name ty ctx.moduleFuns}
 
 alterBorrowCount :: Int -> Var -> Span -> Tc ()
@@ -249,6 +251,8 @@ verifyCtxSubset s m = do
   pure v
 
 -- | Drop the variable.
+--
+-- Works on references and other trivial types like integers.
 dropVar :: Var -> Span -> Tc ()
 dropVar v s = do
   (borrowCount, ty) <- lookupEntry v s
@@ -259,6 +263,7 @@ dropVar v s = do
     RefTy l _ -> decrementLts l
     Univ Many l _ _ _ -> decrementLts l
     FunTy Many _ l _ -> decrementLts l
+    TyCon tyName | tyName == i64TyName -> pure ()
     _ -> throwError $ CannotDropTy ty s
   deleteVar v s
 

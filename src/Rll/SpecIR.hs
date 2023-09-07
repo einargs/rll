@@ -2,14 +2,16 @@ module Rll.SpecIR
   ( SpecF(..), SpecIR(..), MVar
   , mangleDataType, mangleFun, mangleLambda
   , mangleDataCon, mangleDataConFun, mangleFastFun
-  , mangleEntryFun
+  , mangleEntryFun, mangleBuiltInFun
   , mvarToText
   , SpecDataType(..)
   , SpecBuiltIn(..)
   , SpecDecl(..)
+  , SpecResult(..)
   ) where
 
 import Rll.Ast
+import Rll.Context (getBuiltInFunName, BuiltInFun)
 
 import Data.Hashable (Hashable(..))
 import Data.HashMap.Strict qualified as M
@@ -23,10 +25,16 @@ import Data.Aeson.Types qualified as AT
 import GHC.Generics
 import GHC.Stack
 
+data SpecResult = SpecResult
+  { declOrder :: [(MVar, SpecDecl)]
+  , declMap :: M.HashMap MVar SpecDecl
+  }
+
 data SpecF a
   = CaseSF a [CaseBranchTy a]
   | LetStructSF SVar [(SVar, Ty)] a a
   | LetSF SVar a a
+  | BuiltInFunSF BuiltInFun
   -- | Create an initial closure for a function.
   --
   -- The first hashset is variables that are moved into the closure.
@@ -106,6 +114,7 @@ instance Pretty SpecIR where
         "let" <+> pretty v <+> "="
         <+> group (go 0 t1) <+> "in" <> line <> go 0 t2
       DropSF v _ t1 -> "drop" <+> pretty v <+> "in" <> line <> go 0 t1
+      BuiltInFunSF fun -> pretty $ getBuiltInFunName fun
       ClosureSF v env -> pretty v <> group (pretty env)
       RecClosureSF mv recFun -> pretty mv <> "{" <> pretty recFun <> "}"
       VarSF v -> "!" <> pretty v
@@ -168,6 +177,7 @@ instance Pretty SpecDataType where
 -- globals when eventually creating their actual invocable types.
 data SpecDecl
   = SpecFun ClosureEnv (Maybe SVar) [(SVar, Ty, Mult)] SpecIR
+  | SpecBuiltInFun BuiltInFun
   | SpecDataType SpecDataType
   deriving (Show, Eq, Generic)
 
@@ -187,6 +197,7 @@ instance Pretty SpecDecl where
     pargs = fillSep $ parg <$> args
     parg (v, ty, _) = parens $ pretty v <+> ":" <+> pretty ty
   pretty (SpecDataType dt) = pretty dt
+  pretty (SpecBuiltInFun fun) = pretty $ getBuiltInFunName fun
 
 -- | A mangled variable name.
 data MVar = MVar !Var !Text
@@ -241,6 +252,10 @@ mangleDataCon (MVar (Var dtName) slug) (Var con) = MVar name slug
 mangleDataConFun :: MVar -> Var -> MVar
 mangleDataConFun (MVar (Var dtName) slug) (Var con) = MVar name slug
   where name = Var $ T.concat ["c", dtName, ".", con]
+
+mangleBuiltInFun :: BuiltInFun -> MVar
+mangleBuiltInFun fun = MVar name "" where
+  name = Var $ T.concat ["builtin.", getBuiltInFunName fun]
 
 mangleFun :: Var -> [Ty] -> MVar
 mangleFun v tys = MVar v $ mangleTypes tys

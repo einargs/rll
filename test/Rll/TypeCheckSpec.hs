@@ -1226,6 +1226,35 @@ spec = parallel do
         i2 : I64 = -13561;
         |]
 
+    it "can copy and drop integers" do
+      baseTest [txt|
+        i1 : I64 = 14566;
+
+        main : Unit
+        = let i2 = i1 in
+        let ilit1 = 23 in
+        let ilit2 = copy ilit1 in
+        drop ilit2 in
+        drop ilit1 in
+        let i3 = copy i2 in
+        drop i2 in
+        drop i3 in
+        Unit;
+        |]
+
+    it "can add integers" do
+      baseTest [txt|
+        main : Unit
+        = let i1 = 23 in
+        let i2 = 4 in
+        let i3 = addI64 i1 i2 in
+        let i4 = addI64 1 54 in
+        let i5 = addI64 i3 6 in
+        drop i4 in
+        drop i5 in
+        Unit;
+        |]
+
     it "can check string literals" do
       baseTest [txt|
         s1 : String = "hello ";

@@ -1,13 +1,18 @@
 module Rll.Context
   ( Ctx(..), DataType(..), localEq, onTermVars, subsetOf, diffCtxTerms, emptyCtx
   , BuiltInType(..), getDataTypeName, getDataConArgNum
+  , BuiltInFun(..), getBuiltInFunName, getBuiltInFunTy, builtInFunNameMap
   ) where
 
+import Rll.Ast
+
 import Data.HashMap.Strict qualified as M
+import GHC.Generics (Generic)
 import Data.Text (Text, unpack)
 import Data.List (foldl')
+import Data.Hashable (Hashable(..))
 
-import Rll.Ast
+import Data.Aeson (FromJSON, ToJSON)
 
 -- | Only localTypeVars is actual de-brujin indices that get shifted.
 data Ctx = Ctx
@@ -29,9 +34,11 @@ data Ctx = Ctx
   } deriving (Eq, Show)
 
 emptyCtx :: Ctx
-emptyCtx = Ctx M.empty M.empty [] M.empty M.empty dataTypes where
+emptyCtx = Ctx M.empty M.empty [] builtInFuns' M.empty dataTypes where
   dataTypes = M.fromList $ f <$> [minBound..maxBound]
   f ty = (Var $ getBuiltInName ty, BuiltInType ty)
+  -- We start our map of module level functions with the list of built-in functions.
+  builtInFuns' = getBuiltInFunTy <$> builtInFunNameMap
 
 -- | Check for equality only on the local term variables and types.
 localEq :: Ctx -> Ctx -> Bool
@@ -77,8 +84,8 @@ data BuiltInType
 
 getBuiltInName :: BuiltInType -> Text
 getBuiltInName enum = case enum of
-  BuiltInI64 -> "I64"
-  BuiltInString -> "String"
+  BuiltInI64 -> i64TyName.name
+  BuiltInString -> stringTyName.name
 
 data DataType
   = EnumType Text [TypeParam] (M.HashMap Text [Ty]) Span
@@ -106,3 +113,28 @@ getDataConArgNum dt con = case dt of
   BuiltInType b -> case b of
     BuiltInI64 -> error "has no constructor"
     BuiltInString -> error "has no constructor"
+
+-- | Enum listing all of our built-in functions.
+data BuiltInFun
+  = AddI64
+  deriving (Eq, Show, Enum, Bounded, Generic, Hashable, FromJSON, ToJSON)
+
+getBuiltInFunName :: BuiltInFun -> Text
+getBuiltInFunName fun = case fun of
+  AddI64 -> "addI64"
+
+builtInFunNameMap :: M.HashMap Var BuiltInFun
+builtInFunNameMap = M.fromList $ g <$> [minBound..maxBound]
+  where
+  g fun = (Var $ getBuiltInFunName fun, fun)
+
+getBuiltInFunTy :: BuiltInFun -> Ty
+getBuiltInFunTy fun = case fun of
+  AddI64 -> mkBuiltinFun [i64, i64] i64
+  where
+  i64 = TyCon i64TyName
+  lift = Ty $ Span "builtin" 0 0 0 0
+  -- This assumes that the function is always re-usable
+  mkBuiltinFun :: [TyF Ty] -> TyF Ty -> Ty
+  mkBuiltinFun args retTy = foldr f (lift retTy) args where
+    f arg ret = lift $ FunTy Many (lift arg) (lift $ LtJoin []) ret

@@ -3,7 +3,7 @@ module Rll.GenSpec where
 
 import QuoteTxt
 import qualified Rll.Parser as RP
-import Rll.SpecIR (SpecDecl, MVar)
+import Rll.SpecIR (SpecResult(..))
 import Rll.TypeCheck (typeCheckFile)
 import Rll.TypeError (prettyPrintError)
 import Rll.TcMonad (runTc)
@@ -18,21 +18,20 @@ import LLVM.AST.DataLayout qualified as A
 
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.HashMap.Strict qualified as HM
 import Text.Megaparsec qualified as MP
 import Data.ByteString.Char8 qualified as BS
 import Test.Hspec
 
-parseFile' :: Text -> IO (Maybe ([(MVar, SpecDecl)], HM.HashMap MVar SpecDecl))
+parseFile' :: Text -> IO (Maybe SpecResult)
 parseFile' txt = case MP.parse RP.fileDecls "test.rll" txt of
   Left err -> exFail $ MP.errorBundlePretty err
   Right decls ->
     case runTc emptyCtx $ typeCheckFile decls of
       Left err -> exFail $ T.unpack $ prettyPrintError txt err
-      Right (coreFns, ctx) ->
-        case specModule ctx.dataTypes coreFns of
+      Right (tcResult, _) ->
+        case specModule tcResult of
           Left err -> exFail $ "Specialization error: " <> show err
-          Right declInfo -> pure $ Just declInfo
+          Right specResult -> pure $ Just specResult
   where
   exFail msg = do
     expectationFailure msg
@@ -43,9 +42,9 @@ willGen txt = do
   mbSpecDecls <- parseFile' txt
   case mbSpecDecls of
     Nothing -> pure ()
-    Just (order, specDecls) -> L.withContext \ctx -> do
+    Just SpecResult{..} -> L.withContext \ctx -> do
       let layout = A.defaultDataLayout A.LittleEndian
-      result <- runGen specDecls order ctx layout
+      result <- runGen declMap declOrder ctx layout
       case result of
         Left err -> expectationFailure $ "Gen error: " <> show err
         Right defs -> do
@@ -192,7 +191,7 @@ spec = do
         L;
         |]
     -- TODO: tests for including functions and function references inside closure environments.
-    it "can run" do
+    it "can run a complex use case" do
       willGen [txt|
         struct Unit {}
         struct L { }
@@ -217,4 +216,16 @@ spec = do
         let destroyL = \(l:L) -> let L = l in Unit in
         let v = Right (extractRight ['destroyL] [L] [R] &destroyL tup) in
         drop destroyL in v;
+        |]
+    it "can add 64 bit integers" do
+      willGen [txt|
+        struct Unit {}
+        double : I64 -M[]> I64
+        = \ i -> addI64 (copy i) i;
+
+        main : Unit -M[]> Unit
+        = \ u ->
+        let i = double 64 in
+        drop i in
+        u;
         |]

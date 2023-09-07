@@ -6,8 +6,10 @@ module Rll.GenLLVM
 
 import Rll.SpecIR
 import Rll.Ast
+import Rll.Context (BuiltInFun(..), getBuiltInFunTy)
 
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Data.ByteString.Short (ShortByteString, toShort)
 import Control.Monad.State (MonadState(..), StateT, runStateT, modify', gets, state)
@@ -129,6 +131,7 @@ runBuildIR act = state \genCtx ->
       genCtx' = genCtx{moduleState=buildIRModule}
   in ((result, SL.getSnocList buildIRLocal.builderBlocks), genCtx')
 
+{-
 -- | Get the closure info for a function.
 --
 -- Generates the function if it doesn't already exist.
@@ -144,6 +147,7 @@ closureInfoFor var = do
         Just (SpecFun cenv mbFix params body) ->
           genFun var cenv mbFix params body
         _ -> throwError $ NoSpecFunNamed var
+-}
 
 irClosureInfo :: MVar -> BuildIR ClosureInfo
 irClosureInfo mvar = do
@@ -300,7 +304,6 @@ prepareFunValue funMVar cenv cenvTy = do
   IR.store closurePtr 1 contextVal
   buildFunValueFor funMVar closurePtr
 
--- TODO: documentation
 -- | Get the llvm representation of a RLL type.
 --
 -- Will call `genType` if it hasn't already been generated.
@@ -308,6 +311,7 @@ toLlvmType :: HasCallStack => Ty -> Gen A.Type
 toLlvmType Ty{tyf=FunTy _ _ _ _} = pure funValueType
 toLlvmType Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = pure funValueType
 toLlvmType Ty{tyf=RefTy _ _} = pure A.ptr
+toLlvmType Ty{tyf=TyCon v} | v == i64TyName = pure A.i64
 toLlvmType ty = do
   mvar <- case mvarForDataTy ty of
     Just mvar -> pure mvar
@@ -340,6 +344,7 @@ opaqueTypeFor :: Ty -> A.Type
 opaqueTypeFor Ty{tyf=FunTy _ _ _ _} = funValueType
 opaqueTypeFor Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = funValueType
 opaqueTypeFor Ty{tyf=RefTy _ _} = A.ptr
+opaqueTypeFor Ty{tyf=TyCon v} | v == i64TyName = A.i64
 opaqueTypeFor ty = case mvarForDataTy ty of
   Nothing -> error "shouldn't be possible"
   Just mvar -> A.NamedTypeReference $ mvarToName $ mvar
@@ -565,7 +570,9 @@ buildClosurePtr heldArgs = do
 -- | Generate the entry function for a function.
 genEntryFun :: MVar -> Ty -> A.Type -> [A.Type] -> Gen ()
 genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
+  DT.traceM "marker 0"
   (_, entryBlocks) <- runBuildIR mdo
+    DT.traceM $ "marker thing"
     entryk <- IR.block `named` "entry"
     -- this is the number of already applied arguments stored in our
     -- closure.
@@ -574,6 +581,7 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
 
     impossible <- IR.block `named` "impossible"
     IR.unreachable
+    DT.traceM "marker 1"
 
     -- All closures will have a context argument stored in them,
     -- even if that context argument is a zero width type.
@@ -797,6 +805,7 @@ genIR cenvTy = go where
   -- | Where we handle all of the IR cases.
   go :: SpecIR -> BuildIR A.Operand
   go expr = case expr.specf of
+    BuiltInFunSF fun -> builtInFunCall fun []
     ClosureSF funMVar cenv -> do
       cenvOp <- buildClosureEnv cenv
       closurePtr <- buildClosurePtr [cenvOp]
@@ -807,6 +816,9 @@ genIR cenvTy = go where
       buildFunValueFor funMVar closurePtr
     AppSF funExpr args -> do
       case funExpr.specf of
+        BuiltInFunSF fun -> do
+          argOps <- traverse go args
+          builtInFunCall fun argOps
         ClosureSF funMVar cenv -> do
           argOps <- traverse go args
           cenvOp <- buildClosureEnv cenv
@@ -881,9 +893,6 @@ genIR cenvTy = go where
         conVal <- IR.load conTy enumLoc 1
         forM_ (zip [0..] memVarTys) \(i, (SVar{var}, varTy)) -> do
           mem <- IR.extractValue conVal [i]
-          -- TODO: I think I'm going to need to add info about the enum types to the branch?
-          -- Yeah, change up `CaseBranch` for something where the memSVars are paired with their
-          -- RLL type. Actually this maybe needs to be backpropagated to the Core IR as well.
           introVar var varTy mem
         conResult <- go body
         IR.br caseEnd
@@ -908,30 +917,112 @@ genIR cenvTy = go where
         mem <- IR.extractValue structVal [i]
         introVar var varTy mem
       go t2
-    LiteralSF lit -> error "TODO"
+    LiteralSF (IntLit value) -> pure $ IR.int64 value
+    LiteralSF (StringLit txt) -> error "TODO: strings not implemented"
+
+-- | Introduce a function argument.
+introArg :: Var -> A.Type -> VarLoc -> BuildIR (A.Name, A.Operand)
+introArg var llvmTy varLoc = do
+  name <- introVarName var
+  let argRef = A.LocalReference llvmTy name
+  -- We need to store it on the stack so that it can have references
+  -- taken in the function body.
+  case varLoc of
+    OnStack -> void $ introVarWithLoc var OnStack argRef
+    -- For in register stuff, we can just skip
+    InReg -> pure ()
+  pure (name, argRef)
+
+-- | Get both the llvm and rll arguments and return type for a built-in function.
+builtInFunLlvmInfo :: BuiltInFun -> Gen ([Ty], [A.Type], Ty, A.Type)
+builtInFunLlvmInfo fun = do
+  args <- traverse toLlvmType rllArgs
+  ret <- toLlvmType rllRet
+  pure (rllArgs, args, rllRet, ret)
+  where
+  (rllArgs, rllRet) = case parseFunTy $ getBuiltInFunTy fun of
+    Just info -> info
+    Nothing -> error "Compiler error: built-in functions should be monomorphic functions"
+
+-- | Perform an operation for a built-in function if there are enough
+-- operands.
+builtInFunOp :: BuiltInFun -> [A.Operand] -> BuildIR (Maybe A.Operand)
+builtInFunOp AddI64 [a1, a2] = Just <$> IR.add a1 a2
+builtInFunOp _ _ = pure Nothing
+
+-- | Generate a call to a built-in function/operation.
+--
+-- If there are enough arguments we'll inline the operation.
+builtInFunCall :: BuiltInFun -> [A.Operand] -> BuildIR A.Operand
+builtInFunCall fun args = do
+  opResult <- builtInFunOp fun args
+  case opResult of
+    Just result -> pure result
+    Nothing -> do
+      -- We know that we don't have enough and need to build a closure
+      -- pointer.
+      --
+      -- One advantage of this is that we don't need to generate or store
+      -- any `ClosureInfo` because we can get that just from `fun`. Normally
+      -- you can't figure out how many arguments the llvm function takes
+      -- just from the type, but we don't have that problem.
+      clPtr <- buildClosurePtr args
+      buildFunValueFor (mangleBuiltInFun fun) clPtr
+
+-- | Generate the fast function wrapper and entry function for a built-in function.
+genBuiltInFun :: BuiltInFun -> Gen ()
+genBuiltInFun fun = do
+  (rllArgTys, llvmArgTys, rllRetTy, llvmRetTy) <- builtInFunLlvmInfo fun
+  ctxEnvTy <- closureEnvToType $ ClosureEnv M.empty
+  let argVars = [1..length llvmArgTys + 1] <&> \i -> Var $ "arg" <> T.pack (show i)
+      ctxEnvVar = Var "arg0"
+      fullArgTys = ctxEnvTy:llvmArgTys
+  DT.traceM $ "generating built-in fun: " <> show fun
+  (argNames, llvmBlocks) <- runBuildIR do
+    _entry <- IR.block `named` "entry"
+    ctxEnvName <- introVarName ctxEnvVar
+    let calcArgs a b c = fmap unzip $ sequence $ zipWith3 introArg a b c
+    (argNames, args) <- calcArgs argVars llvmArgTys $ isTyOnStack <$> rllArgTys
+    opResult <- builtInFunOp fun args
+    when (opResult == Nothing) $ error "Compiler error: failed to generate operation"
+    pure $ ctxEnvName:argNames
+  DT.traceM $ "generated blocks"
+  let fastParams = zipWith (\name ty -> A.Parameter ty name []) argNames llvmArgTys
+      fastName = mvarToName $ mangleFastFun funMVar
+      fastDef = baseFunctionDefaults
+        { AG.name = fastName
+        , AG.parameters = (fastParams, False) -- False means not varargs
+        , AG.basicBlocks = llvmBlocks
+        , AG.returnType = llvmRetTy
+        }
+      llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
+  emitDefn $ A.GlobalDefinition fastDef
+  DT.traceM $ "call genEntryFun"
+  genEntryFun (mangleBuiltInFun fun) rllRetTy llvmRetTy llvmArgTys
+  DT.traceM $ "finish genEntryFun"
+  where
+  funMVar = mangleBuiltInFun fun
 
 -- | Generate the entry and fast function.
 genFun :: HasCallStack => MVar -> ClosureEnv -> (Maybe SVar) -> [(SVar, Ty, Mult)] -> SpecIR -> Gen ClosureInfo
 genFun funMVar cenv mbFix params body = do
-  DT.traceM $ "!genFun: " <> show funMVar
   cim <- gets (.closureInfo)
   case M.lookup funMVar cim of
     Just ci -> pure ci
     Nothing -> do
-      -- DT.traceM $ "!body: " <> show body
-      -- DT.traceM $ "!body.ty: " <> show body.ty
       fastRetTy <- toLlvmType body.ty
       ctxTy <- closureEnvToType cenv
       llvmParamTys <- traverse toLlvmType paramTys
       (allArgNames, fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
         (ctxName, ctxOp) <- introArg contextVar ctxTy InReg
-        (argNames, _) <- fmap unzip $ sequence $ zipWith3 introArg paramVars llvmParamTys $ isTyOnStack <$> paramTys
+        let calcArgs a b c = fmap unzip $ sequence $ zipWith3 introArg a b c
+        (argNames, _) <- calcArgs paramVars llvmParamTys $ isTyOnStack <$> paramTys
         case mbFix of
           Nothing -> pure ()
           Just SVar{var} -> do
-            buildFunValueFor funMVar ctxOp
-            error "TODO create function value that calls this function and store it"
+            val <- buildFunValueFor funMVar ctxOp
+            void $ introVarWithLoc var InReg val
         extractClosureEnv cenv ctxOp
         genIR ctxTy body
         pure $ ctxName:argNames
@@ -944,25 +1035,12 @@ genFun funMVar cenv mbFix params body = do
             , AG.returnType = fastRetTy
             }
           llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
-      DT.traceM $ "fastParams: " <> show fastParams
       emitDefn $ A.GlobalDefinition fastDef
       genEntryFun funMVar body.ty fastRetTy llvmArgTys
       let closureInfo = ClosureInfo fastRetTy llvmArgTys
       addClosureInfo funMVar closureInfo
       pure closureInfo
   where
-  -- | Introduce a function argument.
-  introArg :: Var -> A.Type -> VarLoc -> BuildIR (A.Name, A.Operand)
-  introArg var llvmTy varLoc = do
-    name <- introVarName var
-    let argRef = A.LocalReference llvmTy name
-    -- We need to store it on the stack so that it can have references
-    -- taken in the function body.
-    case varLoc of
-      OnStack -> void $ introVarWithLoc var OnStack argRef
-      -- For in register stuff, we can just skip 
-      InReg -> pure ()
-    pure (name, argRef)
   (paramVars, paramTys) = unzip $ params <&> \(svar, ty, _) -> (svar.var, ty)
   contextVar = mkRecContextVar $ maybe (Var "emptyCtx") (.var) mbFix
 
@@ -997,6 +1075,11 @@ genDecl mvar decl = case decl of
   SpecDataType sdt -> do
     DT.traceM $ "Generating type: " <> show mvar
     void $ genType mvar sdt
+    DT.traceM $ "Generated type: " <> show mvar
+  SpecBuiltInFun fun -> do
+    DT.traceM $ "call genBuiltInFun"
+    genBuiltInFun fun
+    DT.traceM $ "finish genBuiltInFun"
   SpecFun cenv mbFix args bodyIR -> void $ genFun mvar cenv mbFix args bodyIR
 
 -- | Generate a list of LLVM definitions.
@@ -1022,7 +1105,7 @@ runGen specDeclMap specDecls llvmCtx dl = do
             specDecls' = reverse specDecls
             tyDecls = filter isTyDecl specDecls'
             funDecls = filter (not . isTyDecl) specDecls'
-        -- DT.traceM $ "decls: " <> show specDeclMap
+        DT.traceM $ "decls: " <> show funDecls
         traverse_ (uncurry genDecl) $ tyDecls
         traverse_ (uncurry genDecl) $ funDecls
   fmap f $ runExceptT $ flip runStateT genCtx $ unGen act

@@ -2,10 +2,13 @@
 module Rll.Core
   ( CoreF(..), Core(..)
   , extendAppTm
+  , TcResult(..)
   ) where
 
 import Rll.Ast
 import Rll.Context (DataType)
+
+import Data.HashMap.Strict qualified as M
 
 -- | This IR is produced during type checking and annotates every
 -- term with its type.
@@ -39,3 +42,8 @@ instance Show Core where
 
 instance Spans Core where
   getSpan = (.span)
+
+data TcResult = TcResult
+  { coreFuns :: [(Var, Core)]
+  , dataTypes :: M.HashMap Var DataType
+  }

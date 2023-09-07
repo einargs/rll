@@ -516,6 +516,8 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
         alterBorrowCount 1 v' vs
         pure $ Core vTy s $ CopyCF v
       RefTy _ _ -> pure $ Core vTy s $ CopyCF v
+      TyCon tyName | tyName == i64TyName ->
+                     pure $ Core vTy s $ CopyCF v
       _ -> throwError $ CannotCopyNonRef vTy s
   RefTm v -> do
     ty <- createVarRef v s
@@ -548,9 +550,9 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
         pure $ Core bTy s $ extendAppTm t1Core t2Core
       _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1
   LiteralTm lit ->
-    let ty = case lit of
-          IntLit _ -> Ty s $ TyCon (Var "I64")
-          StringLit _ -> Ty s $ TyCon (Var "String")
+    let ty = Ty s $ TyCon $ case lit of
+          IntLit _ -> i64TyName
+          StringLit _ -> stringTyName
     in pure $ Core ty s $ LiteralCF lit
 
 check :: Ty -> Tm -> Tc Core
@@ -574,8 +576,12 @@ check ty tm@Tm{span=s, tmf} = verifyCtxSubset s $ case tmf of
 
 -- | Type checks all declarations in the file and generates the Core IR
 -- for all of the functions.
-typeCheckFile :: [Decl] -> Tc [(Var, Core)]
-typeCheckFile = fmap catMaybes . mapM go where
+typeCheckFile :: [Decl] -> Tc TcResult
+typeCheckFile decls = do
+  coreFuns <- catMaybes <$> mapM go decls
+  dataTypes <- gets (.dataTypes)
+  pure $ TcResult coreFuns dataTypes
+  where
   go decl = case decl of
     FunDecl name ty body s -> do
       ctx <- get

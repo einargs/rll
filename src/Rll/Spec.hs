@@ -1,11 +1,14 @@
 module Rll.Spec
   ( specModule
+  , SpecResult(..)
   , SpecErr(..)
   , prettyDeclMap
   ) where
 
 import Rll.Ast
-import Rll.Context (DataType(..), BuiltInType(..), getDataTypeName, getDataConArgNum)
+import Rll.Context
+  ( DataType(..), BuiltInType(..), getDataTypeName, getDataConArgNum
+  , BuiltInFun(..), builtInFunNameMap)
 import Rll.Core
 import Rll.TypeSub (applyTypeParams, tyIsConcrete, typeAppSubs)
 import Rll.SpecIR
@@ -13,7 +16,7 @@ import Rll.SpecIR
 import Data.HashMap.Strict qualified as M
 import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
-import Control.Monad (void, forM_)
+import Control.Monad (void, forM_, when)
 import Data.Foldable (traverse_)
 import Data.List (foldl', elemIndex)
 import Control.Exception (assert)
@@ -263,9 +266,7 @@ specExpr core@Core{span, coref} = do
       _ -> pure ()
     case coref of
       LetStructCF sv mems t1 t2 -> fmap sf $ LetStructSF sv mems <$> specExpr t1 <*> specExpr t2
-      ModuleVarCF v -> do
-        mvar <- specFunDef v []
-        pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
+      ModuleVarCF v -> sf <$> specFunDef v []
       LocalVarCF v -> lookupLocalFun v >>= \case
         Just _ -> sf <$> specLocalFun v []
         Nothing -> pure $ sf $ VarSF v
@@ -294,9 +295,7 @@ specExpr core@Core{span, coref} = do
           -- pure $ sf $ ConSF mvar var
         -- Recursive functions should be picked up here as well.
         LocalVarCF v -> sf <$> specLocalFun v tys
-        ModuleVarCF v -> do
-          mvar <- specFunDef v tys
-          pure $ sf $ ClosureSF mvar $ ClosureEnv M.empty
+        ModuleVarCF v -> sf <$> specFunDef v tys
         LamCF fix polyB argB env body -> throwError $ NoImmediateSpec span
         -- NOTE: how do we handle trying to specialize a reference?
         -- I think that's automatically rejected?
@@ -380,9 +379,7 @@ specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
     -- already compiled
     MonoLF mvar envVar -> pure $ RecClosureSF mvar envVar
     -- This is just the name of a top level function.
-    TopLF v -> do
-      mvar <- specFunDef v tyArgs
-      pure $ ClosureSF mvar $ ClosureEnv M.empty
+    TopLF v -> specFunDef v tyArgs
     PolyLF i (PolyLambda fix polyB argB env bodyCore) -> do
       enclosingFun <- gets (.enclosingFun)
       let name = mangleLambda enclosingFun tyArgs i
@@ -394,9 +391,9 @@ specLocalFun lfName tyArgs = lookupLocalFun lfName >>= \case
         pure $ SpecFun env fix argB' body
       pure $ ClosureSF name env
 
--- | Specialize a call to a top level function definition.
-specFunDef :: Var -> [Ty] -> Spec MVar
-specFunDef name tyArgs = guardDecl mangledName do
+-- | Specialize a call to a top level function defined in the module.
+specModuleFunDef :: Var -> [Ty] -> Spec MVar
+specModuleFunDef name tyArgs = guardDecl mangledName do
   -- We save the lambdas we started with, and use a blank map for
   -- when we're specializing this function, since it's separate.
   SpecCtx
@@ -427,12 +424,22 @@ specFunDef name tyArgs = guardDecl mangledName do
         (fix, args, body')
     _ -> (Nothing, [], fullCore)
 
+-- | Specialize a call to a top level function definition.
+specFunDef :: Var -> [Ty] -> Spec (SpecF SpecIR)
+specFunDef name tyArgs = case builtInFunNameMap M.!? name of
+  Nothing -> do
+    mvar <- specModuleFunDef name tyArgs
+    pure $ ClosureSF mvar $ ClosureEnv M.empty
+  Just fun -> do
+    when (tyArgs /= []) $ error "Compiler error: currently should have no polymorphic builtin functions"
+    guardDecl (mangleBuiltInFun fun) $ pure $ SpecBuiltInFun fun
+    pure $ BuiltInFunSF fun
+
 -- | Specialize a core module.
 --
 -- Uses an unspecialized main function as an entry point.
-specModule :: M.HashMap Var DataType -> [(Var, Core)] ->
-  Either SpecErr ([(MVar, SpecDecl)], M.HashMap MVar SpecDecl)
-specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
+specModule :: TcResult -> Either SpecErr SpecResult
+specModule TcResult{dataTypes, coreFuns} = run $ specFunDef (Var "main") []
   where
   ctx = SpecCtx
     { specDecls = M.empty
@@ -443,5 +450,5 @@ specModule dataTypes coreFuns = run $ specFunDef (Var "main") []
     , lambdaCounter = 0
     , enclosingFun = error "Should be overriden by specFunDef"
     }
-  extract SpecCtx{specDeclOrder,specDecls} = (specDeclOrder, specDecls)
+  extract SpecCtx{..} = SpecResult specDeclOrder specDecls
   run spec = fmap (extract . snd) $ runExcept $ flip runStateT ctx $ unSpec spec
