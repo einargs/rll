@@ -263,7 +263,7 @@ dropVar v s = do
     RefTy l _ -> decrementLts l
     Univ Many l _ _ _ -> decrementLts l
     FunTy Many _ l _ -> decrementLts l
-    TyCon tyName | tyName == i64TyName -> pure ()
+    I64Ty -> pure ()
     _ -> throwError $ CannotDropTy ty s
   deleteVar v s
 

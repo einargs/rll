@@ -516,8 +516,7 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
         alterBorrowCount 1 v' vs
         pure $ Core vTy s $ CopyCF v
       RefTy _ _ -> pure $ Core vTy s $ CopyCF v
-      TyCon tyName | tyName == i64TyName ->
-                     pure $ Core vTy s $ CopyCF v
+      I64Ty -> pure $ Core vTy s $ CopyCF v
       _ -> throwError $ CannotCopyNonRef vTy s
   RefTm v -> do
     ty <- createVarRef v s
@@ -550,9 +549,9 @@ synth tm@Tm{span=s, tmf} = verifyCtxSubset (getSpan tm) $ case tmf of
         pure $ Core bTy s $ extendAppTm t1Core t2Core
       _ -> throwError $ TyIsNotFun t1Ty $ getSpan t1
   LiteralTm lit ->
-    let ty = Ty s $ TyCon $ case lit of
-          IntLit _ -> i64TyName
-          StringLit _ -> stringTyName
+    let ty = Ty s $ case lit of
+          IntLit _ -> I64Ty
+          StringLit _ -> StringTy
     in pure $ Core ty s $ LiteralCF lit
 
 check :: Ty -> Tm -> Tc Core

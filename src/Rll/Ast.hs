@@ -1,8 +1,10 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Rll.Ast
   ( Span(..), Spans(..)
   , Var(..), TyVar(..), SVar(..), TyVarBinding(..)
   , EnumCon(..), TypeParam(..), Decl(..)
-  , Kind(..), Mult(..), Ty(..), TyF(..)
+  , Kind(..), Mult(..), Ty(..), TyF(.., I64Ty, StringTy)
   , Tm(..), TmF(..), CaseBranch(..), Literal(..)
   , CaseBranchTy(..)
   , parseTyCon, parseFunTy
@@ -185,8 +187,14 @@ data Ty = Ty { span :: Span, tyf :: (TyF Ty) }
 i64TyName :: Var
 i64TyName = Var "I64"
 
+pattern I64Ty :: TyF a
+pattern I64Ty = TyCon (Var "I64")
+
 stringTyName :: Var
 stringTyName = Var "String"
+
+pattern StringTy :: TyF a
+pattern StringTy = TyCon (Var "String")
 
 instance FromJSON Ty where
   parseJSON v = Ty es <$> parseJSON v

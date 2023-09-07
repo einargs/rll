@@ -311,7 +311,7 @@ toLlvmType :: HasCallStack => Ty -> Gen A.Type
 toLlvmType Ty{tyf=FunTy _ _ _ _} = pure funValueType
 toLlvmType Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = pure funValueType
 toLlvmType Ty{tyf=RefTy _ _} = pure A.ptr
-toLlvmType Ty{tyf=TyCon v} | v == i64TyName = pure A.i64
+toLlvmType Ty{tyf=I64Ty} = pure A.i64
 toLlvmType ty = do
   mvar <- case mvarForDataTy ty of
     Just mvar -> pure mvar
@@ -344,7 +344,7 @@ opaqueTypeFor :: Ty -> A.Type
 opaqueTypeFor Ty{tyf=FunTy _ _ _ _} = funValueType
 opaqueTypeFor Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = funValueType
 opaqueTypeFor Ty{tyf=RefTy _ _} = A.ptr
-opaqueTypeFor Ty{tyf=TyCon v} | v == i64TyName = A.i64
+opaqueTypeFor Ty{tyf=I64Ty} = A.i64
 opaqueTypeFor ty = case mvarForDataTy ty of
   Nothing -> error "shouldn't be possible"
   Just mvar -> A.NamedTypeReference $ mvarToName $ mvar
@@ -846,6 +846,7 @@ genIR cenvTy = go where
           varOp <- localVarRaw svar.var funValueType
           freeClosurePtrIn varOp
         RefTy _ _ -> pure ()
+        I64Ty -> pure ()
         _ -> error "shouldn't be able to drop this"
       go body
     LetSF svar t1 t2 -> do
@@ -966,28 +967,29 @@ builtInFunCall fun args = do
       -- any `ClosureInfo` because we can get that just from `fun`. Normally
       -- you can't figure out how many arguments the llvm function takes
       -- just from the type, but we don't have that problem.
-      clPtr <- buildClosurePtr args
+      blankCenvOp <- buildClosureEnv $ ClosureEnv M.empty
+      clPtr <- buildClosurePtr $ blankCenvOp:args
       buildFunValueFor (mangleBuiltInFun fun) clPtr
 
 -- | Generate the fast function wrapper and entry function for a built-in function.
 genBuiltInFun :: BuiltInFun -> Gen ()
 genBuiltInFun fun = do
   (rllArgTys, llvmArgTys, rllRetTy, llvmRetTy) <- builtInFunLlvmInfo fun
-  ctxEnvTy <- closureEnvToType $ ClosureEnv M.empty
+  cenvTy <- closureEnvToType $ ClosureEnv M.empty
   let argVars = [1..length llvmArgTys + 1] <&> \i -> Var $ "arg" <> T.pack (show i)
-      ctxEnvVar = Var "arg0"
-      fullArgTys = ctxEnvTy:llvmArgTys
+      cenvVar = Var "arg0"
+      fullArgTys = cenvTy:llvmArgTys
   DT.traceM $ "generating built-in fun: " <> show fun
   (argNames, llvmBlocks) <- runBuildIR do
     _entry <- IR.block `named` "entry"
-    ctxEnvName <- introVarName ctxEnvVar
+    cenvName <- introVarName cenvVar
     let calcArgs a b c = fmap unzip $ sequence $ zipWith3 introArg a b c
     (argNames, args) <- calcArgs argVars llvmArgTys $ isTyOnStack <$> rllArgTys
     opResult <- builtInFunOp fun args
     when (opResult == Nothing) $ error "Compiler error: failed to generate operation"
-    pure $ ctxEnvName:argNames
+    pure $ cenvName:argNames
   DT.traceM $ "generated blocks"
-  let fastParams = zipWith (\name ty -> A.Parameter ty name []) argNames llvmArgTys
+  let fastParams = zipWith (\name ty -> A.Parameter ty name []) argNames fullArgTys
       fastName = mvarToName $ mangleFastFun funMVar
       fastDef = baseFunctionDefaults
         { AG.name = fastName
@@ -998,7 +1000,7 @@ genBuiltInFun fun = do
       llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
   emitDefn $ A.GlobalDefinition fastDef
   DT.traceM $ "call genEntryFun"
-  genEntryFun (mangleBuiltInFun fun) rllRetTy llvmRetTy llvmArgTys
+  genEntryFun (mangleBuiltInFun fun) rllRetTy llvmRetTy fullArgTys
   DT.traceM $ "finish genEntryFun"
   where
   funMVar = mangleBuiltInFun fun
