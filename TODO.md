@@ -1,4 +1,12 @@
 # Current
+NOTE: when debugging an error with the IR, try emitting it and running llc on it. llc
+has much better errors.
+
+NOTE: running `lli` (interpreter for llvm ir) with the library on the llvmir is very
+useful. You do need a `main` function.
+
+`lli --load=$(gcc --print-file-name=libc.so.6) ./llvmir`
+
 ## Specialization
 Write a pass to specialize function code.
 
@@ -84,20 +92,18 @@ Thoughts
   problems when determining whether they're on the stack or not via `Moved` and `Refd`.
 
 Next
-- [X] Make integer literals copyable and dropable.
-- [X] Make `genIR` generate code for literal `Int64`s.
-- [ ] Add a way to have built-in functions implemented in LLVM.
-  - [X] Inline builtin ops in GenLLVM.
-  - [X] Generate the baseline wrappers around built-in operations.
-  - [ ] I don't know if I need to generate empty `ClosureEnv` arguments for the built-in fast functions
-    or not. I'm going to guess that I don't and hope the entry function still works?
-  - [ ] Generate entry function wrappers around built-in operation wrappers. I'll need to somehow abstract
-    this part to avoid duplication with existing entry function generation.
-  - [ ] I could maybe do something to avoid duplicating code for the wrappers and built-in operations.
 - [ ] Take out all the trace statements.
 - [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
+- [ ] Write a way to JIT compile and test generated functions.
+  - [ ] Decide on how I want to do error handling
+- [ ] Move `SpecErr` to `SpecIR.hs`
+- [ ] Write a separate module that basically just orchestrates compilation stages.
+  - Has a thing where you can swap out compilation/generation methods.
+- [ ] For some reason, llvm-hs 12 has a bunch of tools for defining passes and shit that llvm-hs 15
+  doesn't have. I may need to forward port at some point.
 
 Future
+- [ ] Look into removing the need to generate empty `ClosureEnv` stuff. Or maybe it's fine.
 - [ ] Remove all of the Aeson FromJSON and ToJSON stuff.
 - [ ] In the future, we'll add another map to `Ctx` during type checking that will hold all `extern`
   references to C functions.

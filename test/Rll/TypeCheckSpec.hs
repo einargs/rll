@@ -1255,6 +1255,19 @@ spec = parallel do
         Unit;
         |]
 
+    it "can partially apply addition" do
+      baseTest [txt|
+        main : Unit
+        = let f = addI64 23 in
+        let i1 = &f 4 in
+        let i2 = &f 65 in
+        let i3 = addI64 i1 i2 in
+        let i4 = &f i3 in
+        drop f in
+        drop i4 in
+        Unit;
+        |]
+
     it "can check string literals" do
       baseTest [txt|
         s1 : String = "hello ";

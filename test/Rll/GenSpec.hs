@@ -10,12 +10,15 @@ import Rll.TcMonad (runTc)
 import Rll.Spec (specModule)
 import Rll.Context
 import Rll.GenLLVM
+import Rll.OrchTypes qualified as OT
+import Rll.Orchestra (jitModule)
 
 import LLVM.Context qualified as L
 import LLVM.Module qualified as L
 import LLVM.AST qualified as A
 import LLVM.AST.DataLayout qualified as A
 
+import Data.Int (Int64)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Text.Megaparsec qualified as MP
@@ -42,9 +45,9 @@ willGen txt = do
   mbSpecDecls <- parseFile' txt
   case mbSpecDecls of
     Nothing -> pure ()
-    Just SpecResult{..} -> L.withContext \ctx -> do
+    Just specResult -> L.withContext \ctx -> do
       let layout = A.defaultDataLayout A.LittleEndian
-      result <- runGen declMap declOrder ctx layout
+      result <- runGen specResult ctx layout
       case result of
         Left err -> expectationFailure $ "Gen error: " <> show err
         Right defs -> do
@@ -52,6 +55,19 @@ willGen txt = do
           -- print $ "defs: " <> show defs
           llvm <- L.withModuleFromAST ctx mod L.moduleLLVMAssembly
           BS.putStrLn llvm
+
+jit :: Int64 -> Int64 -> Text -> Expectation
+jit input output source = do
+  let src = OT.RllSrcModule
+            { fileName = "test.rll"
+            , moduleName = "test"
+            , moduleSrc = source
+            }
+  jitModule src \case
+    Left err -> expectationFailure $ T.unpack $ OT.prettyPrintError src err
+    Right fun -> do
+      val <- fun input
+      val `shouldBe` output
 
 spec :: Spec
 spec = do
@@ -217,7 +233,11 @@ spec = do
         let v = Right (extractRight ['destroyL] [L] [R] &destroyL tup) in
         drop destroyL in v;
         |]
-    it "can add 64 bit integers" do
+    it "can double a 64 bit integer using the JIT" do
+      jit 1 2 [txt|
+        main : I64 -M[]> I64
+        = \i -> addI64 (copy i) i;
+        |]
       willGen [txt|
         struct Unit {}
         double : I64 -M[]> I64

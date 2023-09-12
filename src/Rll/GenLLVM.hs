@@ -436,13 +436,16 @@ createClosureEnv cenv cenvTy = do
 
 -- | Build a structure with the given llvm types as fields
 -- in addition to the initial argument counter.
+--
+-- This is strictly a type that only the entry functions and
+-- things calling them need to worry about.
 mkClosureType :: [A.Type] -> A.Type
 mkClosureType fields = A.StructureType False $ A.i32:fields
 
 -- | If the closure environment is empty, for right now
 -- we just trust llvm to optimize away the empty type.
 closureEnvToType :: ClosureEnv -> Gen A.Type
-closureEnvToType cenv = mkClosureType
+closureEnvToType cenv = A.StructureType False
   <$> traverse closureUseTy (M.elems cenv.envMap)
 
 -- | Custom defaults for all functions.
@@ -570,9 +573,7 @@ buildClosurePtr heldArgs = do
 -- | Generate the entry function for a function.
 genEntryFun :: MVar -> Ty -> A.Type -> [A.Type] -> Gen ()
 genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
-  DT.traceM "marker 0"
   (_, entryBlocks) <- runBuildIR mdo
-    DT.traceM $ "marker thing"
     entryk <- IR.block `named` "entry"
     -- this is the number of already applied arguments stored in our
     -- closure.
@@ -581,7 +582,6 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
 
     impossible <- IR.block `named` "impossible"
     IR.unreachable
-    DT.traceM "marker 1"
 
     -- All closures will have a context argument stored in them,
     -- even if that context argument is a zero width type.
@@ -669,7 +669,7 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
         , A.Parameter A.ptr "returnPtr" []
         ], False)
     , AG.basicBlocks = entryBlocks
-    , AG.returnType = funValueType
+    , AG.returnType = A.void
     }
   where
   -- Arguments for inside the function
@@ -839,7 +839,9 @@ genIR cenvTy = go where
           when isDropped $ freeClosurePtrIn funVal
           pure result
     VarSF var -> localVarOp var expr.ty $ opaqueTypeFor expr.ty
-    CopySF var -> localVarRaw var $ typeForRef expr.ty
+    CopySF var -> case expr.ty.tyf of
+      I64Ty -> localVarLoad var A.i64
+      _ -> localVarRaw var $ typeForRef expr.ty
     DropSF svar varTy body -> do
       case varTy.tyf of
         FunTy Many _ _ _ -> do
@@ -986,7 +988,9 @@ genBuiltInFun fun = do
     let calcArgs a b c = fmap unzip $ sequence $ zipWith3 introArg a b c
     (argNames, args) <- calcArgs argVars llvmArgTys $ isTyOnStack <$> rllArgTys
     opResult <- builtInFunOp fun args
-    when (opResult == Nothing) $ error "Compiler error: failed to generate operation"
+    case opResult of
+      Nothing -> error "Compiler error: failed to generate operation"
+      Just funRes -> IR.ret funRes
     pure $ cenvName:argNames
   DT.traceM $ "generated blocks"
   let fastParams = zipWith (\name ty -> A.Parameter ty name []) argNames fullArgTys
@@ -1026,7 +1030,8 @@ genFun funMVar cenv mbFix params body = do
             val <- buildFunValueFor funMVar ctxOp
             void $ introVarWithLoc var InReg val
         extractClosureEnv cenv ctxOp
-        genIR ctxTy body
+        bodyVal <- genIR ctxTy body
+        IR.ret bodyVal
         pure $ ctxName:argNames
       let fastParams = zipWith (\name ty -> A.Parameter ty name []) allArgNames (ctxTy:llvmParamTys)
           fastName = mvarToName $ mangleFastFun funMVar
@@ -1046,12 +1051,40 @@ genFun funMVar cenv mbFix params body = do
   (paramVars, paramTys) = unzip $ params <&> \(svar, ty, _) -> (svar.var, ty)
   contextVar = mkRecContextVar $ maybe (Var "emptyCtx") (.var) mbFix
 
+-- | Declare an entry main that the JIT can interact with.
+declareEntryMain :: Gen ()
+declareEntryMain = do
+  void $ function "entryMain" [(A.i64, "val")] A.i64 \[val] -> do
+    let emptyVal = IR.struct Nothing False []
+        args = fmap (,[]) [emptyVal, val]
+    result <- IR.call mainTy mainRef args `named` "result"
+    IR.ret result
+  {-
+  void $ function "main" [] A.void \[] -> do
+    let entryMainRef = funRef "entryMain"
+        args = fmap (,[]) [IR.int64 1]
+    result <- IR.call lliMainTy entryMainRef args `named` "result"
+    formatStr <- IR.globalStringPtr "%lld\n" "print_answer"
+    let pargs = fmap (,[]) [A.ConstantOperand formatStr, result]
+    IR.call printfTy printfRef pargs
+    IR.retVoid
+  -}
+  where
+  funRef = A.ConstantOperand . A.GlobalReference
+  emptyStructTy = A.StructureType False []
+  lliMainTy = A.FunctionType A.i64 [] False
+  printfTy = A.FunctionType A.void [A.ptr] True
+  printfRef = funRef "printf"
+  mainTy = A.FunctionType A.i64 [emptyStructTy, A.i64] False
+  mainRef = funRef "main%.fast"
+
 -- | Declare the external functions for all the important calls like malloc.
 llvmDeclarations :: Gen ()
 llvmDeclarations = do
   void $ typedef "FunValueType" $ Just $ A.StructureType False [A.ptr, A.ptr]
   void $ extern "malloc" [A.i32] A.ptr
   void $ extern "free" [A.ptr] A.void
+  -- void $ externVarArgs "printf" [A.ptr] A.void
 
 -- | Perform a get element pointer on the type to get its size
 -- and then malloc a space on the heap.
@@ -1087,27 +1120,27 @@ genDecl mvar decl = case decl of
 -- | Generate a list of LLVM definitions.
 --
 -- Takes a map of declarations and a list of declarations in the correct load order.
-runGen :: M.HashMap MVar SpecDecl -> [(MVar, SpecDecl)]
-  -> I.Context -> A.DataLayout -> IO (Either GenErr [A.Definition])
-runGen specDeclMap specDecls llvmCtx dl = do
-  forM_ specDecls \(v, sd) -> do
+runGen :: SpecResult -> I.Context -> A.DataLayout -> IO (Either GenErr [A.Definition])
+runGen SpecResult{..} llvmCtx dl = do
+  forM_ declOrder \(v, sd) -> do
     print $ show v <> ": " <> show sd
   let genCtx = GenCtx {
         llvmContext=llvmCtx,
         dataLayout=dl,
-        specDecls=specDeclMap,
+        specDecls=declMap,
         moduleState=emptyModuleBuilder,
         closureInfo=M.empty
         }
-      f = fmap \(_,ctx) -> SL.unSnocList $ ctx.moduleState.builderDefs
       act = do
         llvmDeclarations
         let isTyDecl (_, SpecDataType _) = True
             isTyDecl _ = False
-            specDecls' = reverse specDecls
+            specDecls' = reverse declOrder
             tyDecls = filter isTyDecl specDecls'
             funDecls = filter (not . isTyDecl) specDecls'
-        DT.traceM $ "decls: " <> show funDecls
         traverse_ (uncurry genDecl) $ tyDecls
         traverse_ (uncurry genDecl) $ funDecls
-  fmap f $ runExceptT $ flip runStateT genCtx $ unGen act
+        declareEntryMain
+        defs <- gets (.moduleState.builderDefs)
+        pure $ SL.unSnocList defs
+  fmap (fst <$>) $ runExceptT $ flip runStateT genCtx $ unGen act

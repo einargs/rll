@@ -31,6 +31,8 @@ library
       Rll.Core
       Rll.GenLLVM
       Rll.LtSet
+      Rll.Orchestra
+      Rll.OrchTypes
       Rll.Parser
       Rll.Spec
       Rll.SpecIR
