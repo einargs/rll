@@ -4,7 +4,7 @@ module Rll.OrchTypes
   ) where
 
 import qualified Rll.Parser as RP
-import Rll.Spec (SpecErr)
+import Rll.SpecIR (SpecErr)
 import Rll.TypeError (TyErr)
 import Rll.TypeError qualified as TE
 import Rll.GenLLVM (GenErr)

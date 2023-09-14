@@ -1,11 +1,35 @@
 # Current
-NOTE: when debugging an error with the IR, try emitting it and running llc on it. llc
-has much better errors.
 
-NOTE: running `lli` (interpreter for llvm ir) with the library on the llvmir is very
-useful. You do need a `main` function.
+Next
+- [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
+- [X] Write a way to JIT compile and test generated functions.
+- [X] Move `SpecErr` to `SpecIR.hs`
+- [X] Write a separate module that basically just orchestrates compilation stages.
+  - Has a thing where you can swap out compilation/generation methods.
 
-`lli --load=$(gcc --print-file-name=libc.so.6) ./llvmir`
+Future
+- [ ] Change my naming conventions for closure stuff. I need separate names for:
+  - `ClosureEnv` argument
+  - the argument pointer in a function value
+  - function value
+- [ ] Look into removing the need to generate empty `ClosureEnv` stuff. Or maybe it's fine.
+- [ ] Remove all of the Aeson FromJSON and ToJSON stuff.
+- [ ] In the future, we'll add another map to `Ctx` during type checking that will hold all `extern`
+  references to C functions.
+  - Maybe I should make `Tc` emit declarations? Where do I check that data types don't have
+    recursive references right now.
+- [ ] I need to fix that problem where either we never infer that multi-argument functions can return many
+  use functions, or that the type checker rejects them even if they're explicitly defined.
+  - may need to check that created functions work right
+- [ ] I need to write up a list (on paper) of all the different pieces of my modules so I can separate them out.
+  - Maybe use a types folder where I declare types?
+- [ ] Clean up `TODO.md`; it's fine to just delete sections since they're still in git.
+  - [ ] Also make like a documentation file where I can move/rewrite some documentation stuff.
+- [ ] I should split `GenLLVM` into something focused on generating code for expressions, something focused
+  on generating code for types, and something focused on generating functions.
+- [ ] Query based compiler might be a good way to architect this when I re-organize things.
+- [ ] For some reason, llvm-hs 12 has a bunch of tools for defining passes and shit that llvm-hs 15
+  doesn't have. I may need to forward port at some point.
 
 ## Specialization
 Write a pass to specialize function code.
@@ -90,35 +114,6 @@ Thoughts
   have no instructions in them. Not sure if this is a problem.
 - [ ] I'm pretty sure that functions or function references in closure environments is going to cause
   problems when determining whether they're on the stack or not via `Moved` and `Refd`.
-
-Next
-- [ ] Take out all the trace statements.
-- [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
-- [ ] Write a way to JIT compile and test generated functions.
-  - [ ] Decide on how I want to do error handling
-- [ ] Move `SpecErr` to `SpecIR.hs`
-- [ ] Write a separate module that basically just orchestrates compilation stages.
-  - Has a thing where you can swap out compilation/generation methods.
-- [ ] For some reason, llvm-hs 12 has a bunch of tools for defining passes and shit that llvm-hs 15
-  doesn't have. I may need to forward port at some point.
-
-Future
-- [ ] Look into removing the need to generate empty `ClosureEnv` stuff. Or maybe it's fine.
-- [ ] Remove all of the Aeson FromJSON and ToJSON stuff.
-- [ ] In the future, we'll add another map to `Ctx` during type checking that will hold all `extern`
-  references to C functions.
-  - Maybe I should make `Tc` emit declarations? Where do I check that data types don't have
-    recursive references right now.
-- [ ] I need to fix that problem where either we never infer that multi-argument functions can return many
-  use functions, or that the type checker rejects them even if they're explicitly defined.
-  - may need to check that created functions work right
-- [ ] I need to write up a list (on paper) of all the different pieces of my modules so I can separate them out.
-  - Maybe use a types folder where I declare types?
-- [ ] Clean up `TODO.md`; it's fine to just delete sections since they're still in git.
-  - [ ] Also make like a documentation file where I can move/rewrite some documentation stuff.
-- [ ] I should split `GenLLVM` into something focused on generating code for expressions, something focused
-  on generating code for types, and something focused on generating functions.
-- [ ] Query based compiler might be a good way to architect this when I re-organize things.
 
 ### Built-In Function Approaches
 - I can add a separate SpecIR term, or I can just have the proper function definitions generated normally.
@@ -503,6 +498,8 @@ Thoughts about various future features.
   main : I64
   = copy i;
   ```
+- [ ] Far, far in the future it would be cool to have a way to assign a specialized higher order
+  function to e.g. a `const var = map f` and make it fully specialize that.
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

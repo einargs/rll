@@ -1,5 +1,5 @@
 module Rll.SpecIR
-  ( SpecF(..), SpecIR(..), MVar
+  ( SpecErr(..), SpecF(..), SpecIR(..), MVar
   , mangleDataType, mangleFun, mangleLambda
   , mangleDataCon, mangleDataConFun, mangleFastFun
   , mangleEntryFun, mangleBuiltInFun
@@ -29,6 +29,22 @@ data SpecResult = SpecResult
   { declOrder :: [(MVar, SpecDecl)]
   , declMap :: M.HashMap MVar SpecDecl
   }
+
+data SpecErr
+  -- | Could not find the function in `coreFuns`.
+  = NoCoreFun Var
+  -- | You must fully apply the type arguments to a polymorphic
+  -- function before you can use it as a first class value.
+  | MustSpec Span
+  -- | Cannot immediately specialize a polymorphic lambda function.
+  --
+  -- Span of the lambda.
+  | NoImmediateSpec Span
+  -- | Cannot find the data type in `specDecls`.
+  | NoSpecDataType MVar
+  -- | Cannot find the data type in `coreDataTypes`.
+  | NoCoreDataType Var
+  deriving (Show, Eq)
 
 data SpecF a
   = CaseSF a [CaseBranchTy a]

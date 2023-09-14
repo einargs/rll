@@ -230,30 +230,9 @@ funValueType = A.NamedTypeReference "FunValueType"
 
 tmpNullPtr = A.ConstantOperand $ A.Null $ A.ptr
 
--- NOTE: We've isolated the problem to getClosurePtr and getEntryFunPtr
--- It looks like the problem is that checkGEPType fails on the type produced by the call to
--- getIndexedType at line 2559 here: https://llvm.org/doxygen/Instructions_8h_source.html
--- Okay. We've figured out the problem is that uId_1 is an alloca and not a structure in
--- registers. So I'm going to have to figure out how that's happening. I think the alloca
--- happens bc arguments get alloca'd, but I don't know how the operand has the wrong type.
--- Maybe it's from manually emitting instructions? Right, I alloca all args, but I forgot
--- that I need to go in and tell it not to alloca FunValueTypes.
 -- | Get the closure pointer from the function value.
 getClosurePtr :: A.Operand -> BuildIR A.Operand
 getClosurePtr op = IR.extractValue op [0]
-  {- TODO: remove
-  usedNames <- IR.liftIRState $ gets IR.builderUsedNames
-  let newOpType = A.NamedTypeReference "FunValueType" -- A.ArrayType 10 $ A.StructureType False []
-      localRef = case op of
-        A.LocalReference ty name | name == "uId_1" -> A.LocalReference newOpType name
-        _ -> op
-      -- testStruct = IR.struct (Just "FunValueType") False [A.Null A.ptr, A.Null A.ptr]
-  -- IR.emitInstr A.ptr $ A.ExtractValue testStruct [0] []
-  void $ IR.extractValue op [0]
-  pure tmpNullPtr
-  -- IR.emitInstr A.ptr $ A.ExtractValue op [] []
-  -- IR.extractValue op [0]
-  -}
 
 -- | Get the entry function pointer from the function value.
 getEntryFunPtr :: HasCallStack => A.Operand -> BuildIR A.Operand
@@ -354,7 +333,6 @@ opaqueTypeFor ty = case mvarForDataTy ty of
 -- Convenience wrapper for `emitDefn`.
 emitLlvmType :: MVar -> A.Type -> Gen ()
 emitLlvmType mvar ty = do
-  DT.traceM $ "adding type " <> show mvar <> " is " <> show ty
   void $ typedef (mvarToName mvar) (Just ty)
 
 -- | Generate and emit the type if it doesn't already exist.
@@ -391,7 +369,6 @@ genType mvar sdt = do
   def mvar ty = emitLlvmType mvar ty $> ty
   genStruct :: [Ty] -> Gen A.Type
   genStruct mems = do
-    DT.traceM $ "!mems: " <> show mems
     memTys <- traverse toLlvmType mems
     pure $ A.StructureType False memTys
 
@@ -981,7 +958,6 @@ genBuiltInFun fun = do
   let argVars = [1..length llvmArgTys + 1] <&> \i -> Var $ "arg" <> T.pack (show i)
       cenvVar = Var "arg0"
       fullArgTys = cenvTy:llvmArgTys
-  DT.traceM $ "generating built-in fun: " <> show fun
   (argNames, llvmBlocks) <- runBuildIR do
     _entry <- IR.block `named` "entry"
     cenvName <- introVarName cenvVar
@@ -992,7 +968,6 @@ genBuiltInFun fun = do
       Nothing -> error "Compiler error: failed to generate operation"
       Just funRes -> IR.ret funRes
     pure $ cenvName:argNames
-  DT.traceM $ "generated blocks"
   let fastParams = zipWith (\name ty -> A.Parameter ty name []) argNames fullArgTys
       fastName = mvarToName $ mangleFastFun funMVar
       fastDef = baseFunctionDefaults
@@ -1003,9 +978,7 @@ genBuiltInFun fun = do
         }
       llvmArgTys = fastParams <&> \(A.Parameter ty _ _) -> ty
   emitDefn $ A.GlobalDefinition fastDef
-  DT.traceM $ "call genEntryFun"
   genEntryFun (mangleBuiltInFun fun) rllRetTy llvmRetTy fullArgTys
-  DT.traceM $ "finish genEntryFun"
   where
   funMVar = mangleBuiltInFun fun
 
@@ -1057,26 +1030,24 @@ declareEntryMain = do
   void $ function "entryMain" [(A.i64, "val")] A.i64 \[val] -> do
     let emptyVal = IR.struct Nothing False []
         args = fmap (,[]) [emptyVal, val]
+        emptyStructTy = A.StructureType False []
+        mainTy = A.FunctionType A.i64 [emptyStructTy, A.i64] False
+        mainRef = funRef "main%.fast"
     result <- IR.call mainTy mainRef args `named` "result"
     IR.ret result
-  {-
   void $ function "main" [] A.void \[] -> do
     let entryMainRef = funRef "entryMain"
         args = fmap (,[]) [IR.int64 1]
-    result <- IR.call lliMainTy entryMainRef args `named` "result"
+        entryMainTy = A.FunctionType A.i64 [A.i64] False
+        printfTy = A.FunctionType A.void [A.ptr] True
+        printfRef = funRef "printf"
+    result <- IR.call entryMainTy entryMainRef args `named` "result"
     formatStr <- IR.globalStringPtr "%lld\n" "print_answer"
     let pargs = fmap (,[]) [A.ConstantOperand formatStr, result]
     IR.call printfTy printfRef pargs
     IR.retVoid
-  -}
   where
   funRef = A.ConstantOperand . A.GlobalReference
-  emptyStructTy = A.StructureType False []
-  lliMainTy = A.FunctionType A.i64 [] False
-  printfTy = A.FunctionType A.void [A.ptr] True
-  printfRef = funRef "printf"
-  mainTy = A.FunctionType A.i64 [emptyStructTy, A.i64] False
-  mainRef = funRef "main%.fast"
 
 -- | Declare the external functions for all the important calls like malloc.
 llvmDeclarations :: Gen ()
@@ -1084,7 +1055,7 @@ llvmDeclarations = do
   void $ typedef "FunValueType" $ Just $ A.StructureType False [A.ptr, A.ptr]
   void $ extern "malloc" [A.i32] A.ptr
   void $ extern "free" [A.ptr] A.void
-  -- void $ externVarArgs "printf" [A.ptr] A.void
+  void $ externVarArgs "printf" [A.ptr] A.void
 
 -- | Perform a get element pointer on the type to get its size
 -- and then malloc a space on the heap.
@@ -1108,13 +1079,9 @@ freePtr ptrVal = do
 genDecl :: MVar -> SpecDecl -> Gen ()
 genDecl mvar decl = case decl of
   SpecDataType sdt -> do
-    DT.traceM $ "Generating type: " <> show mvar
     void $ genType mvar sdt
-    DT.traceM $ "Generated type: " <> show mvar
   SpecBuiltInFun fun -> do
-    DT.traceM $ "call genBuiltInFun"
     genBuiltInFun fun
-    DT.traceM $ "finish genBuiltInFun"
   SpecFun cenv mbFix args bodyIR -> void $ genFun mvar cenv mbFix args bodyIR
 
 -- | Generate a list of LLVM definitions.

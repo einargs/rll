@@ -22,7 +22,6 @@ import Data.List (foldl', elemIndex)
 import Control.Exception (assert)
 import Data.Text qualified as T
 import Prettyprinter
-import Debug.Trace qualified as D
 
 data Lambda = PolyLambda
   { fix :: Maybe SVar
@@ -52,22 +51,6 @@ data SpecCtx = SpecCtx
   , coreDataTypes :: M.HashMap Var DataType
   , coreFuns :: M.HashMap Var Core
   } deriving Show
-
-data SpecErr
-  -- | Could not find the function in `coreFuns`.
-  = NoCoreFun Var
-  -- | You must fully apply the type arguments to a polymorphic
-  -- function before you can use it as a first class value.
-  | MustSpec Span
-  -- | Cannot immediately specialize a polymorphic lambda function.
-  --
-  -- Span of the lambda.
-  | NoImmediateSpec Span
-  -- | Cannot find the data type in `specDecls`.
-  | NoSpecDataType MVar
-  -- | Cannot find the data type in `coreDataTypes`.
-  | NoCoreDataType Var
-  deriving (Show, Eq)
 
 newtype Spec a = MkSpec { unSpec :: StateT SpecCtx (Except SpecErr) a }
   deriving newtype (Functor, Applicative, Monad, MonadError SpecErr, MonadState SpecCtx)
