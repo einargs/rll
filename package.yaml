@@ -39,6 +39,7 @@ dependencies:
 - aeson >= 2.1.1
 - bytestring >= 0.11
 - filepath >= 1.4.2
+- typed-process >= 0.2.10
 - llvm-hs-pure >= 15.0
 - llvm-hs >= 15.0
 

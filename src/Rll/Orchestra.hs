@@ -15,8 +15,10 @@ import Text.Megaparsec qualified as MP
 import Data.Int (Int64)
 import Foreign.Ptr (FunPtr, wordPtrToPtr, castPtrToFunPtr)
 import Foreign.C.Types (CLong(..))
-import Data.ByteString.Char8 qualified as BS
+import Data.ByteString.Char8 qualified as BSC
+import Data.ByteString.Lazy qualified as LBS
 import Data.Functor ((<&>))
+import System.Process.Typed qualified as PT
 
 import qualified LLVM.CodeModel
 import qualified LLVM.CodeGenOpt
@@ -60,19 +62,20 @@ jitModule src cont = L.withContext \ctx ->
       Left err -> cont $ Left err
       Right astMod -> L.withModuleFromAST ctx astMod \mod -> do
         let passSpec = L.PassSetSpec passes (Just tm)
-        L.runPasses passSpec mod
+        -- L.runPasses passSpec mod
         J.withExecutionSession \es -> do
           -- This gets us the LLVM IR
-          -- asm <- L.moduleLLVMAssembly mod
-          -- BS.putStrLn asm
+          asm <- L.moduleLLVMAssembly mod
+          BSC.writeFile "./llvmir" asm
+          PT.runProcess_ $ PT.setStdin (PT.byteStringInput $ LBS.fromStrict asm) $ "lli --load=$(gcc --print-file-name=libc.so.6)"
           dylib <- J.createJITDylib es "rllDylib"
-          -- I'm pretty sure the problem is that the module is bad.
           J.withClonedThreadSafeModule mod $ \tsm -> do
             ol <- J.createRTDyldObjectLinkingLayer es
             il <- J.createIRCompileLayer es ol tm
 
             -- path found via: `gcc -- gcc --print-file-name=libc.so.6`
-            J.addDynamicLibrarySearchGenerator il dylib "/nix/store/vnwdak3n1w2jjil119j65k8mw1z23p84-glibc-2.35-224/lib/libc.so.6"
+            let glibcPath = "/nix/store/46m4xx889wlhsdj72j38fnlyyvvvvbyb-glibc-2.37-8/lib/libc.so.6"
+            J.addDynamicLibrarySearchGenerator il dylib glibcPath
             J.addModule tsm dylib il
             sym <- J.lookupSymbol es il dylib "entryMain"
             case sym of

@@ -65,10 +65,12 @@ data ClosureInfo = ClosureInfo
 
 data GenCtx = GenCtx
   { llvmContext :: I.Context
+  , specDecls :: M.HashMap MVar SpecDecl
+  -- | The raw types not using named types for each type.
+  , rawLlvmTypes :: M.HashMap MVar A.Type
   -- | The data layout we're using for this module.
   --
   -- Specifically this is the layout used to compute union sizes.
-  , specDecls :: M.HashMap MVar SpecDecl
   , dataLayout :: A.DataLayout
   , moduleState :: ModuleBuilderState
   , closureInfo :: M.HashMap MVar ClosureInfo
@@ -256,7 +258,19 @@ entryFunType :: A.Type
 entryFunType = A.FunctionType A.void args False
   where args = [A.ptr, A.ptr, A.i32, A.ptr]
 
--- | Build a structure value out of dynamic operands.
+-- | Build typed struct IR.
+buildTypedStructIR :: A.Type -> [A.Operand] -> BuildIR A.Operand
+buildTypedStructIR structTy args = do
+  let undef = A.ConstantOperand $ A.Undef structTy
+      f tmp (arg, i) = IR.insertValue tmp arg [i]
+  foldlM f undef $ zip args [0..]
+
+-- | Build struct IR with an MVar name.
+buildNamedStructIR :: MVar -> [A.Operand] -> BuildIR A.Operand
+buildNamedStructIR mvar = buildTypedStructIR ty
+  where ty = A.NamedTypeReference $ mvarToName mvar
+
+-- | Build an anonymous structure value out of dynamic operands.
 --
 -- Note that this is different than `IR.struct` because
 -- that only works with constants.
@@ -272,7 +286,7 @@ buildStructIR args = do
 buildFunValueFor :: MVar -> A.Operand -> BuildIR A.Operand
 buildFunValueFor funMVar closurePtr = do
   let entryFun = refGlobalFun $ mangleEntryFun funMVar
-  buildStructIR [closurePtr, entryFun]
+  buildTypedStructIR funValueType [closurePtr, entryFun]
 
 -- | Create the closure pointer, load free variables into a context
 -- arg and store it there, and then build the function value.
@@ -283,25 +297,31 @@ prepareFunValue funMVar cenv cenvTy = do
   IR.store closurePtr 1 contextVal
   buildFunValueFor funMVar closurePtr
 
--- | Get the llvm representation of a RLL type.
+-- | Try to convert RLL types that aren't data types to LLVM types.
+-- data types.
+simpleTyToLlvm :: Ty -> Maybe A.Type
+simpleTyToLlvm Ty{tyf=FunTy{}} = pure funValueType
+simpleTyToLlvm Ty{tyf=RefTy _ Ty{tyf=FunTy{}}} = pure funValueType
+simpleTyToLlvm Ty{tyf=RefTy _ _} = pure A.ptr
+simpleTyToLlvm Ty{tyf=I64Ty} = pure A.i64
+simpleTyToLlvm _ = Nothing
+
+-- | Get the raw llvm representation of a RLL type.
 --
 -- Will call `genType` if it hasn't already been generated.
-toLlvmType :: HasCallStack => Ty -> Gen A.Type
-toLlvmType Ty{tyf=FunTy _ _ _ _} = pure funValueType
-toLlvmType Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = pure funValueType
-toLlvmType Ty{tyf=RefTy _ _} = pure A.ptr
-toLlvmType Ty{tyf=I64Ty} = pure A.i64
-toLlvmType ty = do
-  mvar <- case mvarForDataTy ty of
-    Just mvar -> pure mvar
-    Nothing -> throwError $ NotTyCon ty
-  let name = mvarToName mvar
-  typeDefs <- gets (.moduleState.builderTypeDefs)
-  case Map.lookup name typeDefs of
-    Just ty -> pure ty
-    Nothing -> do
-      sdt <- lookupSpecDataType mvar
-      genType mvar sdt
+toRawLlvmType :: HasCallStack => Ty -> Gen A.Type
+toRawLlvmType ty = case simpleTyToLlvm ty of
+  Just llvmTy -> pure llvmTy
+  Nothing -> do
+    mvar <- case mvarForDataTy ty of
+      Just mvar -> pure mvar
+      Nothing -> throwError $ NotTyCon ty
+    rawLlvmTypes <- gets (.rawLlvmTypes)
+    case M.lookup mvar rawLlvmTypes of
+      Just ty -> pure ty
+      Nothing -> do
+        sdt <- lookupSpecDataType mvar
+        genType mvar sdt
 
 -- | Get the llvm type representation of a RLL reference type.
 --
@@ -320,13 +340,11 @@ typeForRef _ = error "given a non-reference type"
 -- that code because it needs the full `Gen` monad.
 -- So instead we use an opaque type.
 opaqueTypeFor :: Ty -> A.Type
-opaqueTypeFor Ty{tyf=FunTy _ _ _ _} = funValueType
-opaqueTypeFor Ty{tyf=RefTy _ Ty{tyf=FunTy _ _ _ _}} = funValueType
-opaqueTypeFor Ty{tyf=RefTy _ _} = A.ptr
-opaqueTypeFor Ty{tyf=I64Ty} = A.i64
-opaqueTypeFor ty = case mvarForDataTy ty of
-  Nothing -> error "shouldn't be possible"
-  Just mvar -> A.NamedTypeReference $ mvarToName $ mvar
+opaqueTypeFor ty = case simpleTyToLlvm ty of
+  Just llvmTy -> llvmTy
+  Nothing -> case mvarForDataTy ty of
+    Nothing -> error "shouldn't be possible"
+    Just mvar -> A.NamedTypeReference $ mvarToName $ mvar
 
 -- | Emits an llvm type definition into the module.
 --
@@ -335,42 +353,54 @@ emitLlvmType :: MVar -> A.Type -> Gen ()
 emitLlvmType mvar ty = do
   void $ typedef (mvarToName mvar) (Just ty)
 
--- | Generate and emit the type if it doesn't already exist.
+registerRawType :: MVar -> A.Type -> Gen ()
+registerRawType mvar ty = modify' \ctx ->
+  ctx{rawLlvmTypes=M.insert mvar ty ctx.rawLlvmTypes}
+
+-- | Generate and emit the named type if it doesn't already exist,
+-- and store the full raw type for size calculations.
 --
--- Returns the full type data.
+-- Returns the raw llvm type.
 genType :: HasCallStack => MVar -> SpecDataType -> Gen A.Type
 genType mvar sdt = do
-  typeDefs <- gets (.moduleState.builderTypeDefs)
-  case Map.lookup (mvarToName mvar) typeDefs of
+  rawLlvmTypes <- gets (.rawLlvmTypes)
+  case M.lookup mvar rawLlvmTypes of
     Just ty -> pure ty
     Nothing -> case sdt of
-      SpecStruct con mems -> genStruct mems >>= def mvar
+      SpecStruct con mems -> genStruct mvar [] mems
       -- for the enums, we'll generate a type for each individual
       -- constructor and then do bitcasts.
       SpecEnum cons -> do
-        conTys <- traverse genStruct $ M.elems cons
+        let toStruct tys = do
+              rawTys <- traverse toRawLlvmType tys
+              pure $ A.StructureType False rawTys
+        conTys <- traverse toStruct $ M.elems cons
         maxSize <- maximum <$> traverse getTypeSize conTys
         let payloadType = A.VectorType (fromIntegral maxSize) A.i8
-            enumTy = A.StructureType False $ [A.i8, payloadType]
+            enumTy = if maxSize == 0
+              then A.StructureType False [A.i8]
+              else A.StructureType False $ [A.i8, payloadType]
         -- Here we're creating types for each constructor that look like
         -- { i8, ...rest }
-        forM_ (M.toList cons) \(con, mems) -> do
-          DT.traceM $ "!enum mems: " <> show mems
-          memTys <- traverse toLlvmType mems
-          let conTy = A.StructureType False $ A.i8:memTys
-          emitLlvmType (mangleDataCon mvar $ Var con) conTy
-        def mvar enumTy
+        forM_ (M.toList cons) \(con, mems) ->
+          genStruct (mangleDataCon mvar $ Var con) [A.i8] mems
+        emitLlvmType mvar enumTy
+        registerRawType mvar enumTy
+        pure enumTy
       SpecBuiltIn b -> case b of
         -- For these, we never need to generate a structure, so we just
         -- return the representative type.
         SpecString -> pure A.ptr
         SpecI64 -> pure A.i64
   where
-  def mvar ty = emitLlvmType mvar ty $> ty
-  genStruct :: [Ty] -> Gen A.Type
-  genStruct mems = do
-    memTys <- traverse toLlvmType mems
-    pure $ A.StructureType False memTys
+  genStruct :: MVar -> [A.Type] -> [Ty] -> Gen A.Type
+  genStruct mvar prefix mems = do
+    let memTys = opaqueTypeFor <$> mems
+    emitLlvmType mvar $ A.StructureType False $ prefix <> memTys
+    rawTys <- traverse toRawLlvmType mems
+    let rawTy = A.StructureType False $ prefix <> rawTys
+    registerRawType mvar rawTy
+    pure rawTy
 
 -- | Build the opaque type representing a data constructor case.
 enumConType :: MVar -> Var -> A.Type
@@ -379,10 +409,10 @@ enumConType dtMVar conVar = A.NamedTypeReference $
 
 -- | Convert the closure usage annotations on a type into a
 -- llvm type.
-closureUseTy :: HasCallStack => ClosureUse Ty -> Gen A.Type
+closureUseTy :: HasCallStack => ClosureUse Ty -> A.Type
 closureUseTy use = case use of
-  Moved ty -> toLlvmType ty
-  _ -> pure A.ptr
+  Moved ty -> opaqueTypeFor ty
+  _ -> A.ptr
 
 -- | This assigns an instruction directly to a specific name.
 --
@@ -421,9 +451,8 @@ mkClosureType fields = A.StructureType False $ A.i32:fields
 
 -- | If the closure environment is empty, for right now
 -- we just trust llvm to optimize away the empty type.
-closureEnvToType :: ClosureEnv -> Gen A.Type
-closureEnvToType cenv = A.StructureType False
-  <$> traverse closureUseTy (M.elems cenv.envMap)
+closureEnvToType :: ClosureEnv -> A.Type
+closureEnvToType cenv = A.StructureType False $ closureUseTy <$> M.elems cenv.envMap
 
 -- | Custom defaults for all functions.
 baseFunctionDefaults :: A.Global
@@ -484,11 +513,7 @@ knownCall funMVar cenvOp argOps = do
 
 -- | Use `GEP` to index into a field of a struct in a pointer.
 indexStructPtr :: A.Type -> A.Operand -> Integer -> BuildIR A.Operand
-indexStructPtr ty ptr idx = do
-  val <- IR.gep ty ptr [i0, idx']
-  pure $ DT.trace ("GEP value accessed " <> show idx <> " ty " <> show ty) val
-  where i0 = DT.trace "indexStructPtr GEP" $ IR.int32 0
-        idx' = DT.trace ("indexStructPtr idx GEP " <> show idx) $ IR.int32 idx
+indexStructPtr ty ptr idx = IR.gep ty ptr [IR.int32 0, IR.int32 idx]
 
 -- | Generate the closure type and the structure of the pushed args
 -- on the stack for the number of already applied arguments and
@@ -636,7 +661,6 @@ genEntryFun funMVar fullReturnTy fastRetTy llvmArgs = do
       pure $ (A.Int 32 $ fromInteger i, label)
     pure ()
   let entryBlockNames = entryBlocks <&> \(A.BasicBlock n _ _) -> n
-  DT.traceM $ show funMVar <> " entryBlocks: " <> show entryBlockNames
   emitDefn $ A.GlobalDefinition $ baseFunctionDefaults
     { AG.name = mvarToName $ mangleEntryFun funMVar
     , AG.parameters =
@@ -685,7 +709,6 @@ introVarName (Var txt) = IR.freshName $ textToSBS txt
 localVarName :: Var -> BuildIR A.Name
 localVarName (Var txt) = do
   usedNames <- IR.liftIRState $ gets IR.builderUsedNames
-  DT.traceM $ "used names: " <> show usedNames
   let rawName = textToSBS txt
       nameCount = case Map.lookup rawName usedNames of
         Nothing -> error $ "Variable " <> show txt <> " had not been used."
@@ -835,11 +858,11 @@ genIR cenvTy = go where
       -- start and end the alloc lifetime around `go t2`.
       go t2
     RefSF var -> localVarRaw var $ typeForRef expr.ty
-    StructConSF dtMVar args -> traverse go args >>= buildStructIR
+    StructConSF dtMVar args -> traverse go args >>= buildNamedStructIR dtMVar
     EnumConSF tagValue dtMVar conVar args -> do
       let rawEnumTy = A.NamedTypeReference $ mvarToName dtMVar
       argOps <- traverse go args
-      conVal <- buildStructIR $ (IR.int8 tagValue):argOps
+      conVal <- buildNamedStructIR (mangleDataCon dtMVar conVar) $ (IR.int8 tagValue):argOps
       enumLoc <- IR.alloca rawEnumTy Nothing 1
       IR.store enumLoc 1 conVal
       IR.load rawEnumTy enumLoc 1
@@ -859,7 +882,6 @@ genIR cenvTy = go where
           -- hopefully I can find optimization passes or something to avoid this. Or
           -- a bitcast that works on structures.
           let dtMVar' = fromJust $ mvarForDataTy t1.ty
-          DT.traceM $ "owned " <> show dtMVar' <> " t1: " <> show t1
           rawEnumVal <- go t1
           conTag' <- IR.extractValue rawEnumVal [0] `named` "constructorTag"
           rawEnumTy <- typeOf rawEnumVal
@@ -914,12 +936,11 @@ introArg var llvmTy varLoc = do
   pure (name, argRef)
 
 -- | Get both the llvm and rll arguments and return type for a built-in function.
-builtInFunLlvmInfo :: BuiltInFun -> Gen ([Ty], [A.Type], Ty, A.Type)
-builtInFunLlvmInfo fun = do
-  args <- traverse toLlvmType rllArgs
-  ret <- toLlvmType rllRet
-  pure (rllArgs, args, rllRet, ret)
+builtInFunLlvmInfo :: BuiltInFun -> ([Ty], [A.Type], Ty, A.Type)
+builtInFunLlvmInfo fun = (rllArgs, args, rllRet, ret)
   where
+  args = opaqueTypeFor <$> rllArgs
+  ret = opaqueTypeFor rllRet
   (rllArgs, rllRet) = case parseFunTy $ getBuiltInFunTy fun of
     Just info -> info
     Nothing -> error "Compiler error: built-in functions should be monomorphic functions"
@@ -953,9 +974,9 @@ builtInFunCall fun args = do
 -- | Generate the fast function wrapper and entry function for a built-in function.
 genBuiltInFun :: BuiltInFun -> Gen ()
 genBuiltInFun fun = do
-  (rllArgTys, llvmArgTys, rllRetTy, llvmRetTy) <- builtInFunLlvmInfo fun
-  cenvTy <- closureEnvToType $ ClosureEnv M.empty
-  let argVars = [1..length llvmArgTys + 1] <&> \i -> Var $ "arg" <> T.pack (show i)
+  let (rllArgTys, llvmArgTys, rllRetTy, llvmRetTy) = builtInFunLlvmInfo fun
+      cenvTy = closureEnvToType $ ClosureEnv M.empty
+      argVars = [1..length llvmArgTys + 1] <&> \i -> Var $ "arg" <> T.pack (show i)
       cenvVar = Var "arg0"
       fullArgTys = cenvTy:llvmArgTys
   (argNames, llvmBlocks) <- runBuildIR do
@@ -989,9 +1010,9 @@ genFun funMVar cenv mbFix params body = do
   case M.lookup funMVar cim of
     Just ci -> pure ci
     Nothing -> do
-      fastRetTy <- toLlvmType body.ty
-      ctxTy <- closureEnvToType cenv
-      llvmParamTys <- traverse toLlvmType paramTys
+      let fastRetTy = opaqueTypeFor body.ty
+          ctxTy = closureEnvToType cenv
+          llvmParamTys = opaqueTypeFor <$> paramTys
       (allArgNames, fastBlocks) <- runBuildIR do
         _entry <- IR.block `named` "entry"
         (ctxName, ctxOp) <- introArg contextVar ctxTy InReg
@@ -1089,10 +1110,9 @@ genDecl mvar decl = case decl of
 -- Takes a map of declarations and a list of declarations in the correct load order.
 runGen :: SpecResult -> I.Context -> A.DataLayout -> IO (Either GenErr [A.Definition])
 runGen SpecResult{..} llvmCtx dl = do
-  forM_ declOrder \(v, sd) -> do
-    print $ show v <> ": " <> show sd
   let genCtx = GenCtx {
         llvmContext=llvmCtx,
+        rawLlvmTypes=M.empty,
         dataLayout=dl,
         specDecls=declMap,
         moduleState=emptyModuleBuilder,

@@ -1,5 +1,7 @@
 # LLVM Generation
 - I don't want to use the llvm varargs stuff because then I can't get tailcall optimizations.
+  - [ ] I actually probably could use the var arg intrinsics and only use a c calling convention for entry
+    functions. All tail call optimizations will be happening with fast functions, so that isn't even a downside.
 
 ## LLVM Gen Debugging Tips
 - when debugging an error with the IR, try emitting it and running llc on it. llc

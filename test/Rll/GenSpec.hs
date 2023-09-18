@@ -56,7 +56,7 @@ willGen txt = do
           llvm <- L.withModuleFromAST ctx mod L.moduleLLVMAssembly
           BS.putStrLn llvm
 
-jit :: Int64 -> Int64 -> Text -> Expectation
+jit :: HasCallStack => Int64 -> Int64 -> Text -> Expectation
 jit input output source = do
   let src = OT.RllSrcModule
             { fileName = "test.rll"
@@ -73,27 +73,41 @@ spec :: Spec
 spec = do
   describe "generate llvm" do
     it "generates an id function" do
-      willGen [txt|
+      jit 1 1 [txt|
         struct U2 {}
         struct Unit {}
 
         thing : U2 -M[]> U2
         = \ u -> u;
 
-        main : Unit -M[]> Unit
+        other : Unit -M[]> Unit
         = \u -> u;
+
+        main : I64 -M[]> I64
+        = \i ->
+        let U2 = thing U2 in
+        let Unit = other Unit in i;
         |]
     it "simple bool" do
-      willGen [txt|
+      jit 1 2 [txt|
         enum Bool = True | False;
 
-        main : Bool -M[]> Bool
+        invert : Bool -M[]> Bool
         = \b -> case b of
         | True -> False
         | False -> True;
+
+        main : I64 -M[]> I64
+        = \i1 ->
+        let i2 = case invert False of
+        | True -> addI64 i1 1
+        | False -> addI64 i1 0 in
+        case True of
+        | True -> addI64 i2 4
+        | False -> addI64 i2 2;
         |]
     it "uses a polymorphic type as an argument to a polymorphic function" do
-      willGen [txt|
+      jit 1 2 [txt|
         struct Unit {}
         struct L { }
 
@@ -105,7 +119,7 @@ spec = do
         id : forall M [] a:Type. a -M[]> a
         = \v -> v;
 
-        main : Two -M[]> L
+        center : Two -M[]> L
         = \t ->
         case t of
         | Left l -> l
@@ -116,9 +130,14 @@ spec = do
         let Unit = id [Unit] u3 in
         let Unit = u4 in
         L;
+
+        main : I64 -M[]> I64
+        = \i ->
+        let L = center (Right (R Unit Unit)) in
+        addI64 1 i;
         |]
     it "uses a multi argument function" do
-      willGen [txt|
+      jit 3 4 [txt|
         struct Unit {}
         struct L { }
 
@@ -133,7 +152,7 @@ spec = do
         buildUTup : Unit -M[]> Unit -S[]> Tuple Unit Unit
         = \u1 u2 -> Tuple [Unit] [Unit] u1 u2;
 
-        main : Two -M[]> L
+        center : Two -M[]> L
         = \t ->
         case t of
         | Left l -> l
@@ -144,9 +163,14 @@ spec = do
         let Unit = id [Unit] u3 in
         let Unit = u4 in
         L;
+
+        main : I64 -M[]> I64
+        = \i ->
+        let L = center (Right (R Unit Unit)) in
+        addI64 1 i;
         |]
     it "takes a function as an argument" do
-      willGen [txt|
+      jit 5 6 [txt|
         struct Unit {}
         struct L { }
 
@@ -161,7 +185,7 @@ spec = do
         buildUTup : (Unit -M[]> Unit) -M[]> Unit -S[]> Tuple Unit Unit
         = \uId u2 -> Tuple [Unit] [Unit] (uId Unit) u2;
 
-        main : Two -M[]> L
+        center : Two -M[]> L
         = \t ->
         case t of
         | Left l -> l
@@ -174,9 +198,14 @@ spec = do
         let Unit = u3 in
         let Unit = u4 in
         L;
+
+        main : I64 -M[]> I64
+        = \i ->
+        let L = center (Right (R Unit Unit)) in
+        addI64 i 1;
         |]
     it "takes a reference to a function as an argument" do
-      willGen [txt|
+      jit 7 8 [txt|
         struct Unit {}
         struct L { }
 
@@ -191,7 +220,7 @@ spec = do
         buildUTup : forall M [] l:Lifetime. &l (Unit -M[]> Unit) -M[]> Unit -S[l]> Tuple Unit Unit
         = \uId u2 -> Tuple [Unit] [Unit] (uId Unit) u2;
 
-        main : Two -M[]> L
+        center : Two -M[]> L
         = \t ->
         case t of
         | Left l -> l
@@ -205,10 +234,15 @@ spec = do
         let Unit = id [Unit] u3 in
         let Unit = u4 in
         L;
+
+        main : I64 -M[]> I64
+        = \i ->
+        let L = center (Right (R Unit Unit)) in
+        addI64 i 1;
         |]
     -- TODO: tests for including functions and function references inside closure environments.
     it "can run a complex use case" do
-      willGen [txt|
+      jit 9 10 [txt|
         struct Unit {}
         struct L { }
 
@@ -225,27 +259,24 @@ spec = do
 
         enum Two = Left L | Right R;
 
-        main : Unit -M[]> Two
+        center : Unit -M[]> Two
         = \arg ->
         let Unit = arg in
         let tup = Tuple [L] [R] L (R Unit Unit) in
         let destroyL = \(l:L) -> let L = l in Unit in
         let v = Right (extractRight ['destroyL] [L] [R] &destroyL tup) in
         drop destroyL in v;
+
+        main : I64 -M[]> I64
+        = \i ->
+        case center Unit of
+        | Left l -> let L = l in i
+        | Right r -> let R u1 u2 = r in
+        let Unit = u1 in let Unit = u2 in
+        addI64 i 1;
         |]
     it "can double a 64 bit integer using the JIT" do
       jit 1 2 [txt|
         main : I64 -M[]> I64
         = \i -> addI64 (copy i) i;
-        |]
-      willGen [txt|
-        struct Unit {}
-        double : I64 -M[]> I64
-        = \ i -> addI64 (copy i) i;
-
-        main : Unit -M[]> Unit
-        = \ u ->
-        let i = double 64 in
-        drop i in
-        u;
         |]
