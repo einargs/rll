@@ -10,6 +10,9 @@ Next
   - [ ] There's some weird problem with the simple bool thing not having a case on True give the true branch.
   - [ ] In the "complex use case" test, the order of R and L is getting switched so R is first only in the
     definition of the `Tuple [L] [R]` type.
+    - The problem is that with functions the zero index type var is furthest right, but this isn't true for
+      data types.
+- [ ] Write function to dynamically call `gcc --print-file-name=libc.so.6` to get the path.
 - [ ] Change "no main" error in `Spec` to trigger if main is not a function from I64 to I64.
 - [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
 - [ ] Move `I64` to existing in registers.
@@ -26,6 +29,7 @@ Future
   on generating code for types, and something focused on generating functions.
 - [ ] Research query structured compilers and how to do incremental compilation for when I start doing
   multiple files.
+- [ ] Write some tests that will hit entry functions.
 - [ ] I actually probably could use the var arg intrinsics and only use a c calling convention for entry
   functions. All tail call optimizations will be happening with fast functions, so that isn't even a downside.
 - [ ] Change my naming conventions for closure stuff. I need separate names for:
@@ -515,6 +519,7 @@ Thoughts about various future features.
   ```
 - [ ] Far, far in the future it would be cool to have a way to assign a specialized higher order
   function to e.g. a `const var = map f` and make it fully specialize that.
+- [ ] Biggest QOL feature will be inferring lifetimes/drop locations.
 
 # Notes
 - I can mimic cut in stuff by just using try on say the first part of a parser.

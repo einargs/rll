@@ -369,7 +369,9 @@ genType mvar sdt = do
     Nothing -> case sdt of
       SpecStruct con mems -> genStruct mvar [] mems
       -- for the enums, we'll generate a type for each individual
-      -- constructor and then do bitcasts.
+      -- constructor and then find the maximum size of a case with it's values,
+      -- then create an overall enum type that's a discriminator and a memory
+      -- chunk of the given size.
       SpecEnum cons -> do
         let toStruct tys = do
               rawTys <- traverse toRawLlvmType tys
@@ -379,7 +381,7 @@ genType mvar sdt = do
         let payloadType = A.VectorType (fromIntegral maxSize) A.i8
             enumTy = if maxSize == 0
               then A.StructureType False [A.i8]
-              else A.StructureType False $ [A.i8, payloadType]
+              else A.StructureType False [A.i8, payloadType]
         -- Here we're creating types for each constructor that look like
         -- { i8, ...rest }
         forM_ (M.toList cons) \(con, mems) ->

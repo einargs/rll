@@ -28,7 +28,6 @@ import Control.Arrow (first, second)
 import Data.List (foldl')
 import Data.Maybe (mapMaybe)
 import Control.Exception (assert)
-import Debug.Trace qualified as D
 
 -- | Get the kind of the type. Also checks that the type is well formed.
 kindOf :: Ty -> Tc Kind

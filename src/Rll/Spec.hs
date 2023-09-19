@@ -142,7 +142,6 @@ specDataType dt tyArgs = do
   where
   name = mangleDataType (getDataTypeName dt) tyArgs
   specDt = case dt of
-    -- TODO (?): loop over the member types and specialize them too.
     EnumType name tyParams cases _ -> do
       let cases' = applyTypeParams tyArgs <$> cases
       forM_ cases' $ traverse_ specTy

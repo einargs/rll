@@ -244,7 +244,7 @@ basePrettyTy parenLevel ty@Ty{tyf} = case tyf of
 -- | If the type is a type constructor followed by type applications,
 -- return that; otherwise return nothing.
 parseTyCon :: Ty -> Maybe (Var, [Ty])
-parseTyCon ty = collectApps [] ty where
+parseTyCon ty = fmap reverse <$> collectApps [] ty where
   collectApps :: [Ty] -> Ty -> Maybe (Var, [Ty])
   collectApps rs ty = case ty.tyf of
     TyApp b a -> collectApps (a:rs) b

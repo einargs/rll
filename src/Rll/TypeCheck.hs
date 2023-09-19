@@ -107,8 +107,10 @@ getTyConArgs :: (Ty -> Tc (Var, Ty, [Ty])) -> Ty -> Tc (Var, Ty, [Ty])
 getTyConArgs mkErr ty = do
   tyKind <- kindOf ty
   unless (tyKind == TyKind) $ throwError $ ExpectedKind TyKind tyKind $ getSpan ty
-  getArgs ty
+  (name, t, args) <- getArgs ty
+  pure (name, t, reverse args)
   where
+    -- returns the arguments reversed
     getArgs t = case t.tyf of
       TyCon name -> pure (name, t, [])
       TyApp ty1 ty2 -> do
@@ -602,5 +604,11 @@ typeCheckFile decls = do
       pure Nothing
     where
       indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
-      indexArgs tyParams tys = traverse f tys where
-        f = rawIndexTyVars (length tyParams - 1) $ M.fromList $ zip ((.name) <$> reverse tyParams) [0..]
+      indexArgs tyParams tys = do
+        val <- traverse f tys
+        pure val
+        where
+        -- | We don't reverse tyParams because we want to make sure that the leftmost name is the
+        -- highest index. Because rawIndexTyVars subtracts the associated number from the first
+        -- argument to get the index for that type variable.
+        f = rawIndexTyVars (length tyParams - 1) $ M.fromList $ zip ((.name) <$> tyParams) [0..]

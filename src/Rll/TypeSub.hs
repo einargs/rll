@@ -56,6 +56,8 @@ typeAppSubs args body = typeShift (-n) body' where
   -- NOTE: any bound type variables in body should be skipped over when
   -- unshifting, so the unshift only affects the arguments.
   g ty (i, arg) = rawTypeSub i arg ty
+  -- We reverse because the zeroth argument is the furthest right for functions (and datatypes):
+  -- forall c:Type. forall d:Type. c@1 -M[]> d@0
   body' = foldl' g body $ zip [0..] $ reverse shiftedArgs
 
 -- |
