@@ -604,10 +604,7 @@ typeCheckFile decls = do
       pure Nothing
     where
       indexArgs :: [TypeParam] -> [Ty] -> Tc [Ty]
-      indexArgs tyParams tys = do
-        val <- traverse f tys
-        pure val
-        where
+      indexArgs tyParams tys = traverse f tys where
         -- | We don't reverse tyParams because we want to make sure that the leftmost name is the
         -- highest index. Because rawIndexTyVars subtracts the associated number from the first
         -- argument to get the index for that type variable.

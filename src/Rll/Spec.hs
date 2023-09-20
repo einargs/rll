@@ -18,7 +18,7 @@ import Control.Monad.State (MonadState(..), StateT, modify', runStateT, gets)
 import Control.Monad.Except (MonadError(..), Except, runExcept)
 import Control.Monad (void, forM_, when)
 import Data.Foldable (traverse_)
-import Data.List (foldl', elemIndex)
+import Data.List (foldl', elemIndex, sort)
 import Control.Exception (assert)
 import Data.Text qualified as T
 import Prettyprinter
@@ -168,8 +168,10 @@ specFunArgs :: [(SVar, Ty, Mult)] -> Spec ()
 specFunArgs = traverse_ \(_, ty, _) -> specTy ty
 
 -- | Calculate the tag value for an enum constructor.
+--
+-- We determine the tag value based on sorting it.
 tagValueFor :: Var -> M.HashMap T.Text [Ty] -> Integer
-tagValueFor Var{name} conMap = case elemIndex name (M.keys conMap) of
+tagValueFor Var{name} conMap = case elemIndex name $ sort (M.keys conMap) of
   Nothing -> error "should be prevented by type checking"
   Just i -> toInteger i
 

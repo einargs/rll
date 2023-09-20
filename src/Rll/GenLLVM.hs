@@ -556,8 +556,7 @@ loadMembersFrom startIdx fromTy fromPtr = do
   let fields = drop (fromInteger startIdx) $ getStructFields fromTy
   forM (zip [startIdx..] fields) \(idx, argTy) -> do
     fromArgPtr <- indexStructPtr fromTy fromPtr idx `named` "fromArgPtr"
-    arg <- IR.load argTy fromArgPtr 1 `named` "arg"
-    pure arg
+    IR.load argTy fromArgPtr 1 `named` "arg"
 
 -- | Build a closure pointer that holds the given arguments.
 --
@@ -732,7 +731,7 @@ localVarLoad :: Var -> A.Type -> BuildIR A.Operand
 localVarLoad var llvmTy = do
   name <- localVarName var
   let varPtr = A.LocalReference A.ptr name
-  IR.load llvmTy varPtr 1
+  IR.load llvmTy varPtr 1 `named` textToSBS (var.name <> "_r")
 
 -- | Whether a variable's true value is on the stack and the variable
 -- is just a pointer to that, or the variable is the actual value.

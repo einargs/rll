@@ -9,3 +9,8 @@
 - running `lli` (interpreter for llvm ir) with the library on the llvmir is very
   useful. You do need a `main` function.
   `lli --load=$(gcc --print-file-name=libc.so.6) ./llvmir`
+- Useful trick for debugging values:
+  ```
+  %conTag = zext i8 %constructorTag_0 to i64
+  call void (ptr, ...) @printf(ptr @print_answer, i64 %conTag)
+  ```

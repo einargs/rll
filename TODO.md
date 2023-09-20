@@ -1,21 +1,24 @@
 # Current
 
 Next
-- [ ] Get all compile tests working as JIT tests.
+- [X] Get all compile tests working as JIT tests.
   - [X] There's a problem with `Unit` not being considered the same as `{}` in "generates an id function"
     - I think I just need to go through and make it so that the normal type generation uses the names,
       and only converts them all when we're figuring out the size of a type.
   - [X] THere's a bunch of problems with it not being legal to have a vector type that's zero length.
     - I just need to add a conditional that'll just skip adding the vector type if the max length is zero.
-  - [ ] There's some weird problem with the simple bool thing not having a case on True give the true branch.
-  - [ ] In the "complex use case" test, the order of R and L is getting switched so R is first only in the
+  - [X] There's some weird problem with the simple bool thing not having a case on True give the true branch.
+    - The problem is with the constructor tag values in the switch.
+  - [X] In the "complex use case" test, the order of R and L is getting switched so R is first only in the
     definition of the `Tuple [L] [R]` type.
     - The problem is that with functions the zero index type var is furthest right, but this isn't true for
       data types.
-- [ ] Write function to dynamically call `gcc --print-file-name=libc.so.6` to get the path.
+- [X] Write function to dynamically call `gcc --print-file-name=libc.so.6` to get the path.
 - [ ] Change "no main" error in `Spec` to trigger if main is not a function from I64 to I64.
 - [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
 - [ ] Move `I64` to existing in registers.
+- [ ] Start porting test code from the type checking over to be JIT tests.
+  - [ ] Probably also split up my tests more.
 
 - [X] Write a way to JIT compile and test generated functions.
 - [X] Move `SpecErr` to `SpecIR.hs`
@@ -23,12 +26,15 @@ Next
   - Has a thing where you can swap out compilation/generation methods.
 
 Future
+- [ ] Figure out operators.
+- [ ] Use `~[]>` and `-[]>` instead of `-S[]>` and `-M[]>`.
 - [ ] Clean up `TODO.md`; it's fine to just delete sections since they're still in git.
   - [ ] Also make like a documentation file where I can move/rewrite some documentation stuff.
 - [ ] I should split `GenLLVM` into something focused on generating code for expressions, something focused
   on generating code for types, and something focused on generating functions.
 - [ ] Research query structured compilers and how to do incremental compilation for when I start doing
   multiple files.
+  - [ ] Cool haskell library called Rock designed for this exact kind of thing.
 - [ ] Write some tests that will hit entry functions.
 - [ ] I actually probably could use the var arg intrinsics and only use a c calling convention for entry
   functions. All tail call optimizations will be happening with fast functions, so that isn't even a downside.
@@ -47,8 +53,17 @@ Future
   - may need to check that created functions work right
 - [ ] I need to write up a list (on paper) of all the different pieces of my modules so I can separate them out.
   - Maybe use a types folder where I declare types?
+  - I can just do this when I shift to query based.
 - [ ] For some reason, llvm-hs 12 has a bunch of tools for defining passes and shit that llvm-hs 15
   doesn't have. I may need to forward port at some point.
+
+Road Map
+- [ ] Query based
+- [ ] Infer drop location
+- [ ] World token for IO
+- [ ] Hindley-Milner type inference
+- [ ] traits
+- [ ] monad sugar
 
 ## Specialization
 Write a pass to specialize function code.

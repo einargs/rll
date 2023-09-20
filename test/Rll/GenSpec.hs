@@ -92,6 +92,14 @@ spec = do
       jit 1 2 [txt|
         enum Bool = True | False;
 
+        main : I64 -M[]> I64
+        = \i -> case True of
+        | True -> addI64 i 1
+        | False -> addI64 i 0;
+        |]
+      jit 1 6 [txt|
+        enum Bool = True | False;
+
         invert : Bool -M[]> Bool
         = \b -> case b of
         | True -> False
