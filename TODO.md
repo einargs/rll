@@ -14,6 +14,7 @@ Next
     - The problem is that with functions the zero index type var is furthest right, but this isn't true for
       data types.
 - [X] Write function to dynamically call `gcc --print-file-name=libc.so.6` to get the path.
+- [ ] remove `willGen` from `GenSpec`
 - [ ] Change "no main" error in `Spec` to trigger if main is not a function from I64 to I64.
 - [ ] I should have called them primitive functions instead of built-in functions. Consider renaming.
 - [ ] Move `I64` to existing in registers.
