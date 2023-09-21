@@ -26,6 +26,7 @@ source-repository head
 library
   exposed-modules:
       Lib
+      ProtoStore
       Rll.Ast
       Rll.Context
       Rll.Core
@@ -178,6 +179,7 @@ test-suite rll-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      ProtoStoreSpec
       QuoteTxt
       Rll.AstUtil
       Rll.GenSpec
