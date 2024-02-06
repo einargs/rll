@@ -1,6 +1,6 @@
 cabal-version: 1.12
 
--- This file has been generated from package.yaml by hpack version 0.35.2.
+-- This file has been generated from package.yaml by hpack version 0.36.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -25,6 +25,7 @@ source-repository head
 
 library
   exposed-modules:
+      Atom
       Lib
       Rll.Ast
       Rll.Context
@@ -82,7 +83,8 @@ library
       DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls
   build-depends:
-      aeson >=2.1.1
+      STMonadTrans >=0.4.6
+    , aeson >=2.1.1
     , base >=4.7 && <5
     , bytestring >=0.11
     , containers >=0.6.2
@@ -149,7 +151,8 @@ executable rll-exe
       DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      aeson >=2.1.1
+      STMonadTrans >=0.4.6
+    , aeson >=2.1.1
     , base >=4.7 && <5
     , bytestring >=0.11
     , containers >=0.6.2
@@ -178,6 +181,7 @@ test-suite rll-test
   type: exitcode-stdio-1.0
   main-is: Spec.hs
   other-modules:
+      AtomSpec
       QuoteTxt
       Rll.AstUtil
       Rll.GenSpec
@@ -224,7 +228,8 @@ test-suite rll-test
       DerivingStrategies
   ghc-options: -Wincomplete-patterns -fwarn-unused-imports -fprof-auto-calls -threaded -rtsopts -with-rtsopts=-N
   build-depends:
-      aeson >=2.1.1
+      STMonadTrans >=0.4.6
+    , aeson >=2.1.1
     , base >=4.7 && <5
     , bytestring >=0.11
     , containers >=0.6.2

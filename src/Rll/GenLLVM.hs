@@ -53,7 +53,7 @@ import LLVM.AST.Instruction qualified as A
 import LLVM.AST.Constant qualified as A
 import LLVM.AST qualified as A
 import LLVM.AST.Type qualified as A
-import LLVM.AST.AddrSpace qualified as A
+import LLVM.AST.CallingConvention qualified as CC
 
 -- TODO: I should look at why I never actually use the information stored in this.
 
@@ -751,6 +751,36 @@ isClosureUseOnStack :: ClosureUse Ty -> VarLoc
 isClosureUseOnStack (Moved ty) = isTyOnStack ty
 isClosureUseOnStack _ = InReg
 
+-- | Append the name of a type to an intrinsic operation.
+overloadIntrinsic :: ShortByteString -> A.Type -> A.Name
+overloadIntrinsic base ty = A.Name $ base <> "." <> tyName where
+  tyName :: ShortByteString
+  tyName = case ty of
+    A.VoidType -> "void"
+    A.IntegerType i -> fromString $ "i" <> show i
+    A.NamedTypeReference (A.Name n) -> n
+    A.NamedTypeReference (A.UnName i) -> fromString $ "s_s." <> show i
+    _ -> error "not implemented yet"
+
+-- | Uses the llvm `llvm.ssa.copy` intrinsic to rename a value.
+renameVal :: A.Operand -> A.Name -> BuildIR A.Operand
+renameVal val newName = do
+  ty <- typeOf val
+  let copyName = overloadIntrinsic "llvm.ssa.copy" ty
+      copyRef = A.ConstantOperand $ A.GlobalReference copyName
+  void $ extern copyName [ty] ty
+  addNamedInstr newName $ A.Call
+    { A.tailCallKind = Nothing
+    , A.callingConvention = CC.C
+    , A.returnAttributes = []
+    , A.type' = A.FunctionType ty [ty] False
+    , A.function = Right copyRef
+    , A.arguments = [(val,[])]
+    , A.functionAttributes = []
+    , A.metadata = []
+    }
+  pure $ A.LocalReference ty newName
+
 -- | Takes a variable name and a value and returns an llvm
 -- variable holding either a pointer to the stack allocation
 -- of the value or the value itself.
@@ -759,13 +789,7 @@ introVarWithLoc var varLoc value = do
   name <- introVarName var
   t <- typeOf value
   case varLoc of
-    InReg -> do
-      -- This is a hacky awful thing that just exists to let us alias a register
-      -- level variable.
-      tmpLoc <- IR.alloca t Nothing 1 `named` "tmpLoc"
-      IR.store tmpLoc 1 value
-      addNamedInstr name $ A.Load False t tmpLoc Nothing 1 []
-      pure $ A.LocalReference t name
+    InReg -> renameVal value name
     OnStack -> do
       addNamedInstr name $ A.Alloca t Nothing 1 []
       let loc = A.LocalReference A.ptr name

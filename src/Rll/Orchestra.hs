@@ -58,8 +58,8 @@ prepareModule ctx target src@RllSrcModule{..} =
 runLli :: BSC.ByteString -> IO ()
 runLli asm = do
   PT.runProcess_ $
-    PT.setStdout PT.nullStream $
-    PT.setStderr PT.nullStream $
+    -- PT.setStdout PT.nullStream $
+    -- PT.setStderr PT.nullStream $
     PT.setStdin (PT.byteStringInput $ LBS.fromStrict asm)
     "lli --load=$(gcc --print-file-name=libc.so.6)"
 
@@ -83,8 +83,8 @@ jitModule src cont = L.withContext \ctx ->
           -- This gets us the LLVM IR
           asm <- L.moduleLLVMAssembly mod
           -- This writes the IR to a file for debugging and runs it in `lli` for better error messages.
-          -- BSC.writeFile "./llvmir" asm
-          -- runLli asm
+          BSC.writeFile "./llvmir" asm
+          runLli asm
           dylib <- J.createJITDylib es "rllDylib"
           J.withClonedThreadSafeModule mod $ \tsm -> do
             ol <- J.createRTDyldObjectLinkingLayer es

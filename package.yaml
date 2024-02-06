@@ -42,6 +42,7 @@ dependencies:
 - typed-process >= 0.2.10
 - llvm-hs-pure >= 15.0
 - llvm-hs >= 15.0
+- STMonadTrans >= 0.4.6
 
 default-extensions:
 - BlockArguments
