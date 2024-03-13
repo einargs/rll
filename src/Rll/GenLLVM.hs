@@ -759,10 +759,23 @@ overloadIntrinsic base ty = A.Name $ base <> "." <> tyName where
     A.VoidType -> "void"
     A.IntegerType i -> fromString $ "i" <> show i
     A.NamedTypeReference (A.Name n) -> n
-    A.NamedTypeReference (A.UnName i) -> fromString $ "s_s." <> show i
+    A.NamedTypeReference (A.UnName i) -> fromString $ "p0s_s." <> show i
     _ -> error "not implemented yet"
 
--- | Uses the llvm `llvm.ssa.copy` intrinsic to rename a value.
+{-
+-- | Uses a hacky solution to rename register local variables
+-- because the `llvm.ssa.copy` intrinsic isn't working.
+renameVal :: A.Operand -> A.Name -> BuildIR A.Operand
+renameVal val newName = do
+      -- This is a hacky awful thing that just exists to let us alias a register
+      -- level variable.
+      tmpLoc <- IR.alloca t Nothing 1 `named` "tmpLoc"
+      IR.store tmpLoc 1 value
+      addNamedInstr name $ A.Load False t tmpLoc Nothing 1 []
+      pure $ A.LocalReference t name
+-}
+-- we should be able to use the `llvm.ssa.copy` intrinsic to rename a value,
+-- but it's not working for some reason.
 renameVal :: A.Operand -> A.Name -> BuildIR A.Operand
 renameVal val newName = do
   ty <- typeOf val
@@ -780,6 +793,7 @@ renameVal val newName = do
     , A.metadata = []
     }
   pure $ A.LocalReference ty newName
+--}
 
 -- | Takes a variable name and a value and returns an llvm
 -- variable holding either a pointer to the stack allocation

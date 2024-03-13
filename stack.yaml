@@ -17,7 +17,9 @@
 #
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
-resolver: nightly-2022-12-26 
+#resolver: nightly-2022-12-26 # for ghc 943
+resolver: lts-21.7 #ghc 945
+# resolver: lts-22.13 #ghc 964
 #resolver:
 #  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/17/10.yaml
 
@@ -37,8 +39,8 @@ nix:
 packages:
 - .
 # When we have llvm-hs as a submodule for debugging
-- 'llvm-hs/llvm-hs'
-- 'llvm-hs/llvm-hs-pure'
+# - 'llvm-hs/llvm-hs'
+# - 'llvm-hs/llvm-hs-pure'
 # Dependency packages to be pulled from upstream that are not in the resolver.
 # These entries can reference officially published versions as well as
 # forks / in-progress versions pinned to a git hash. For example:
@@ -51,11 +53,11 @@ packages:
 extra-deps:
 - github: einargs/errata
   commit: 03b05e1c355063b516f6b3d993d6498deaf94e36
-# - github: llvm-hs/llvm-hs
-#   commit: 80e0de0f96eb78288c88fda0eaba0f7cf5d38a30
-#   subdirs:
-#   - llvm-hs-pure
-#   - llvm-hs
+- github: llvm-hs/llvm-hs
+  commit: 80e0de0f96eb78288c88fda0eaba0f7cf5d38a30
+  subdirs:
+  - llvm-hs-pure
+  - llvm-hs
   # llvm-12  423220bffac4990d019fc088c46c5f25310d5a33
 
 # Override default flag values for local packages and extra-deps
