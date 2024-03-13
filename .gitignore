@@ -5,3 +5,7 @@
 **/.#*
 *.prof
 .nix-profiles/
+
+dist-newstyle
+llvmir
+copy.ir

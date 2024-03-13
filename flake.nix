@@ -27,9 +27,9 @@
           shell.name = "rll";
           name = "rll";
           src = ./.;
-          compiler-nix-name = "ghc948";
+          # compiler-nix-name = "ghc948";
           #compiler-nix-name = "ghc943";
-          # compiler-nix-name = "ghc964";
+          compiler-nix-name = "ghc964";
           # This is used by `nix develop .` to open a shell for use with
           # `cabal`, `hlint` and `haskell-language-server`
           shell.tools = {
@@ -43,6 +43,8 @@
             zlib
             llvmPackages_15.libllvm
             nixpkgs-fmt
+            stack
+            # stack-wrapped
           ];
           modules = with pkgs; [{
             packages.llvm-hs.components.library.libs =

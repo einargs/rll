@@ -15,9 +15,35 @@ packages:
     version: 0.4.0.0
   original:
     url: https://github.com/einargs/errata/archive/03b05e1c355063b516f6b3d993d6498deaf94e36.tar.gz
+- completed:
+    name: llvm-hs-pure
+    pantry-tree:
+      sha256: b512f9e5f8f2b3e3a06bad2fa5ff053a83d817798c7efcd47e254e68c842169d
+      size: 2712
+    sha256: c01a266b65e9221032e13293bdefaf7ed233003452614be8aa28a1a3440e4eba
+    size: 9802248
+    subdir: llvm-hs-pure
+    url: https://github.com/llvm-hs/llvm-hs/archive/80e0de0f96eb78288c88fda0eaba0f7cf5d38a30.tar.gz
+    version: 15.0.0
+  original:
+    subdir: llvm-hs-pure
+    url: https://github.com/llvm-hs/llvm-hs/archive/80e0de0f96eb78288c88fda0eaba0f7cf5d38a30.tar.gz
+- completed:
+    name: llvm-hs
+    pantry-tree:
+      sha256: 3b5fa30d13f930135b45d0eb18ba7b7598dda33800515f251ed00b13498121e9
+      size: 12716
+    sha256: c01a266b65e9221032e13293bdefaf7ed233003452614be8aa28a1a3440e4eba
+    size: 9802248
+    subdir: llvm-hs
+    url: https://github.com/llvm-hs/llvm-hs/archive/80e0de0f96eb78288c88fda0eaba0f7cf5d38a30.tar.gz
+    version: 15.0.0
+  original:
+    subdir: llvm-hs
+    url: https://github.com/llvm-hs/llvm-hs/archive/80e0de0f96eb78288c88fda0eaba0f7cf5d38a30.tar.gz
 snapshots:
 - completed:
-    sha256: bbe432b2abd6d866aa37f65a8129a5f858b7c6eaae9464f8bc2814ce92ac2d15
-    size: 573163
-    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/nightly/2022/12/26.yaml
-  original: nightly-2022-12-26
+    sha256: 6f0bea3ba5b07360f25bc886e8cff8d847767557a492a6f7f6dcb06e3cc79ee9
+    size: 712905
+    url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/22/13.yaml
+  original: lts-22.13

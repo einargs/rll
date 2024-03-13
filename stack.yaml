@@ -18,14 +18,18 @@
 # resolver: ./custom-snapshot.yaml
 # resolver: https://example.com/snapshots/2018-01-01.yaml
 #resolver: nightly-2022-12-26 # for ghc 943
-resolver: lts-21.7 #ghc 945
-# resolver: lts-22.13 #ghc 964
+#resolver: lts-21.25 # ghc 948
+# resolver: lts-21.7 #ghc 945
+resolver: lts-22.13 #ghc 964
 #resolver:
 #  url: https://raw.githubusercontent.com/commercialhaskell/stackage-snapshots/master/lts/17/10.yaml
 
-# Use nix
+# Don't use nix
 nix:
-  enable: true
+  enable: false
+
+system-ghc: true
+install-ghc: false
 
 # User packages to be built.
 # Various formats can be used as shown in the example below.
